@@ -1,0 +1,2955 @@
+// ---------------------------------------------------------------------------
+// EstateOS — Prisma schema
+// Derived from realestate-crm-ux-spec.md v1.0, §22 (data model) and the status
+// machines in §6.4, §7.6, §8.5, §9, §10, §11, §12, §14.
+//
+// Design decisions applied (confirmed before generation):
+//
+//  1. Money is BigInt paise everywhere. Never Float, never Float. Serialize to
+//     string at the API boundary — JSON cannot carry BigInt.
+//  2. Multi-tenancy: aggregate roots carry a real `company` relation. Child rows
+//     that inherit scope through a parent carry an indexed `companyId` scalar
+//     only, so Company does not accumulate 65 back-relations. Every query must
+//     still filter on companyId (§25).
+//  3. createdById / updatedById are scalar ids, not relations, to keep User from
+//     growing ~40 back-relation arrays. Domain-meaningful actors (owner,
+//     assignee, approver, holder) are proper relations.
+//  4. Two invariants from §22 need PARTIAL unique indexes, which Prisma cannot
+//     express. They live in prisma/migrations/00000000000000_partial_indexes.
+//     Without that migration both invariants are unenforced at the DB level.
+//  5. Soft delete everywhere (deletedAt). Note this weakens every unique
+//     constraint — see the partial-index migration for unit_code and lead phone.
+//  6. Activity is polymorphic (entityType + entityId, no FK) so one timeline
+//     spans leads, bookings, units and customers. No referential integrity there.
+//  7. PAN / Aadhaar / bank fields are String holding CIPHERTEXT. Prisma has no
+//     encryption layer; encrypt and decrypt in the application (§25).
+//
+// Additions beyond the §22 entity list, required by rules stated elsewhere in
+// the spec: UnitStatusHistory (§7.6), ReceiptAllocation (§11.4 allocation is
+// many-to-many), ProjectMember (§6.2 step 6).
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// ===========================================================================
+// ENUMS — status machines (§22)
+// ===========================================================================
+
+enum RoleCode {
+  SUPER_ADMIN
+  DIRECTOR
+  SALES_HEAD
+  TEAM_LEAD
+  SALES_EXEC
+  PRESALES
+  CRM_EXEC
+  ACCOUNTS
+  MARKETING
+  INVENTORY_ADMIN
+  BROKER
+  CUSTOMER
+}
+
+enum UserStatus {
+  INVITED
+  ACTIVE
+  DEACTIVATED
+}
+
+enum ActorType {
+  USER
+  BROKER
+  CUSTOMER
+  SYSTEM
+}
+
+enum OwnershipType {
+  OWN
+  PARTNER
+}
+
+enum ProjectType {
+  PLOTS
+  VILLAS
+  APARTMENTS
+  COMMERCIAL
+  FARMHOUSE
+}
+
+/// §6.4. SOLD_OUT is set automatically when available = 0 and holds = 0.
+enum ProjectStatus {
+  DRAFT
+  UPCOMING
+  LAUNCHED
+  SELLING
+  SOLD_OUT
+  ON_HOLD
+  CLOSED
+}
+
+enum HierarchyTemplate {
+  PLOTS
+  VILLAS
+  APARTMENTS
+  COMMERCIAL
+}
+
+/// §7.6. Written ONLY by the unit status service, never by direct update.
+enum UnitStatus {
+  AVAILABLE
+  ON_HOLD
+  BLOCKED
+  BOOKED
+  AGREEMENT
+  REGISTERED
+  POSSESSION
+  NOT_FOR_SALE
+}
+
+enum NotForSaleReason {
+  LANDOWNER_SHARE
+  MORTGAGED
+  EWS
+  RESERVED
+  OTHER
+}
+
+enum Facing {
+  NORTH
+  SOUTH
+  EAST
+  WEST
+  NORTH_EAST
+  NORTH_WEST
+  SOUTH_EAST
+  SOUTH_WEST
+}
+
+enum PricingBasis {
+  PER_SQ_YD
+  PER_SQ_FT
+  LUMP_SUM
+}
+
+enum RateCardStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum ChargeBasis {
+  PER_AREA
+  FIXED
+  PERCENT
+}
+
+enum PlcType {
+  PERCENT
+  FIXED_PER_AREA
+  FIXED
+}
+
+/// §8.5. TOKEN and BOOKED are never set manually — only by money and approval.
+enum LeadStage {
+  NEW
+  CONTACTED
+  QUALIFIED
+  VISIT_SCHEDULED
+  VISIT_DONE
+  NEGOTIATION
+  TOKEN
+  BOOKED
+  LOST
+  UNQUALIFIED
+}
+
+/// §8.9. HOT >= 70, WARM 40–69, COLD < 40.
+enum Temperature {
+  HOT
+  WARM
+  COLD
+}
+
+enum LostReason {
+  BUDGET
+  LOCATION
+  BOUGHT_ELSEWHERE
+  NOT_RESPONDING
+  POSTPONED
+  SIZE_UNAVAILABLE
+  PRICE
+  OTHER
+}
+
+enum TaskType {
+  CALL
+  WHATSAPP
+  EMAIL
+  SITE_VISIT_PREP
+  DOCUMENT
+  OTHER
+}
+
+enum TaskStatus {
+  OPEN
+  SNOOZED
+  DONE
+  CANCELLED
+}
+
+/// §8.7.4 quick disposition popover.
+enum DispositionCode {
+  CONNECTED_INTERESTED
+  CONNECTED_NOT_INTERESTED
+  CALLBACK_REQUESTED
+  NOT_REACHABLE
+  WRONG_NUMBER
+  BUSY
+}
+
+enum VisitStatus {
+  SCHEDULED
+  CONFIRMED
+  VISITED
+  NO_SHOW
+  CANCELLED
+  RESCHEDULED
+}
+
+enum VisitType {
+  SITE
+  SAMPLE_FLAT
+  OFFICE
+  VIRTUAL
+}
+
+enum VisitResult {
+  VERY_INTERESTED
+  INTERESTED
+  NEEDS_TIME
+  NOT_INTERESTED
+}
+
+enum BudgetFit {
+  YES
+  STRETCH
+  NO
+}
+
+/// §7.6. Default 48h, max 2 self-service extensions, 3 active per exec.
+enum HoldStatus {
+  ACTIVE
+  EXTENDED
+  RELEASED
+  EXPIRED
+  CONVERTED
+}
+
+/// §10.4. Money-backed blocks never auto-release on expiry.
+enum TokenStatus {
+  RECEIVED
+  EXPIRED
+  CONVERTED
+  REFUNDED
+}
+
+enum PaymentMode {
+  CASH
+  UPI
+  NEFT_RTGS
+  CHEQUE
+  CARD
+  ONLINE_LINK
+}
+
+/// §10.3. One engine, six callers.
+enum ApprovalType {
+  DISCOUNT
+  HOLD_EXTENSION
+  RATE_CARD_PUBLISH
+  BOOKING
+  BOOKING_TRANSFER
+  CANCELLATION
+  REFUND
+  BROKER_PAYOUT
+  PRICE_REVISION
+  DUE_DATE_CHANGE
+  INTEREST_WAIVER
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  COUNTERED
+  ACCEPTED
+  DECLINED
+  ESCALATED
+}
+
+enum BookingStatus {
+  DRAFT
+  PENDING_APPROVAL
+  BOOKED
+  AGREEMENT
+  REGISTERED
+  POSSESSION
+  CANCEL_REQUESTED
+  CANCELLED
+}
+
+/// Drives stamp duty rate (§6.2 step 5: Rajasthan 6% male / 5% female).
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum MaritalStatus {
+  SINGLE
+  MARRIED
+  OTHER
+}
+
+enum KycDocType {
+  PAN
+  AADHAAR_FRONT
+  AADHAAR_BACK
+  PHOTO
+  ADDRESS_PROOF
+  SIGNATURE
+  OTHER
+}
+
+enum FundingType {
+  SELF
+  HOME_LOAN
+}
+
+enum LoanStatus {
+  NOT_APPLIED
+  APPLIED
+  SANCTIONED
+  DISBURSED
+}
+
+enum ESignMethod {
+  AADHAAR_ESIGN
+  PHYSICAL_UPLOAD
+  OTP_CONSENT
+}
+
+enum PlanType {
+  DOWN_PAYMENT
+  TIME_LINKED
+  CONSTRUCTION_LINKED
+  CUSTOM
+}
+
+enum DueRule {
+  DAYS_AFTER_BOOKING
+  FIXED_DATE
+  ON_MILESTONE
+}
+
+enum DemandStatus {
+  UPCOMING
+  DUE
+  OVERDUE
+  PARTIAL
+  PAID
+  WAIVED
+}
+
+enum ReceiptStatus {
+  RECORDED
+  PENDING_CLEARANCE
+  CLEARED
+  BOUNCED
+}
+
+enum RefundStatus {
+  REQUESTED
+  APPROVED
+  PAID
+  REJECTED
+}
+
+enum MilestoneStatus {
+  PLANNED
+  COMPLETED
+}
+
+enum LedgerEntryType {
+  DEBIT
+  CREDIT
+}
+
+enum TicketCategory {
+  PAYMENT
+  DOCUMENT
+  CONSTRUCTION
+  REGISTRATION
+  OTHER
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_CUSTOMER
+  RESOLVED
+  CLOSED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum BrokerStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+}
+
+enum BrokerTier {
+  GOLD
+  SILVER
+  BRONZE
+}
+
+enum CommissionStatus {
+  ACCRUED
+  INVOICED
+  APPROVED
+  PAID
+  CLAWED_BACK
+}
+
+enum DisputeStatus {
+  OPEN
+  RESOLVED
+}
+
+enum CampaignChannel {
+  META
+  GOOGLE
+  PORTAL
+  HOARDING
+  NEWSPAPER
+  RADIO
+  EVENT
+  REFERRAL
+  IVR_NUMBER
+}
+
+enum Channel {
+  WHATSAPP
+  SMS
+  EMAIL
+}
+
+enum TemplateCategory {
+  MARKETING
+  UTILITY
+}
+
+enum TemplateStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+}
+
+enum DocumentType {
+  ALLOTMENT_LETTER
+  AGREEMENT
+  DEMAND_LETTER
+  RECEIPT
+  TOKEN_RECEIPT
+  COST_SHEET
+  BOOKING_APPLICATION
+  CANCELLATION_LETTER
+  NOC
+  POSSESSION_LETTER
+}
+
+enum SequenceTrigger {
+  LEAD_CREATED
+  STAGE_CHANGED
+  VISIT_NO_SHOW
+  COST_SHEET_NOT_VIEWED
+  DEMAND_OVERDUE
+  BOOKING_APPROVED
+  POSSESSION
+}
+
+enum SequenceStepType {
+  SEND_WHATSAPP
+  SEND_SMS
+  SEND_EMAIL
+  CREATE_TASK
+  WAIT
+  CHANGE_TAG
+  NOTIFY_USER
+  IVR_CALL
+  ADD_TO_SEQUENCE
+  EXIT
+}
+
+enum EnrolmentStatus {
+  ACTIVE
+  COMPLETED
+  EXITED
+}
+
+enum BroadcastStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  FAILED
+}
+
+enum ConversationStatus {
+  OPEN
+  CLOSED
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum MessageStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+enum CallDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum CallStatus {
+  INITIATED
+  RINGING
+  CONNECTED
+  COMPLETED
+  MISSED
+  FAILED
+  VOICEMAIL
+}
+
+enum NumberPurpose {
+  SALES
+  CAMPAIGN
+  BROKER
+  COLLECTIONS
+  SUPPORT
+}
+
+enum IvrFlowStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum CallbackStatus {
+  OPEN
+  DONE
+  EXPIRED
+}
+
+enum NotificationChannel {
+  IN_APP
+  BROWSER_PUSH
+  MOBILE_PUSH
+  WHATSAPP
+  EMAIL
+}
+
+enum CustomFieldType {
+  TEXT
+  NUMBER
+  DATE
+  SELECT
+  MULTI_SELECT
+  FILE
+}
+
+enum CustomFieldEntity {
+  LEAD
+  CUSTOMER
+  UNIT
+  BOOKING
+}
+
+enum OfferType {
+  AMOUNT_OFF
+  PERCENT_OFF
+  FREE_ITEM
+}
+
+// ===========================================================================
+// 1. TENANCY & IDENTITY (§3, §17)
+// ===========================================================================
+
+/// A1: GBG Real Estate and Lumotis Realty run as two Companies in one instance.
+model Company {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  name           String
+  legalName      String?   @map("legal_name")
+  shortCode      String    @unique @map("short_code")
+  logoUrl        String?   @map("logo_url")
+  letterheadUrl  String?   @map("letterhead_url")
+  gstin          String?
+  pan            String?
+  reraPromoterNo String?   @map("rera_promoter_no")
+  addressJson    Json?     @map("address_json")
+  /// Name, designation and signature image per signatory — merged into documents.
+  signatoriesJson Json?    @map("signatories_json")
+  financialYearStartMonth Int @default(4) @map("financial_year_start_month")
+  workingHoursJson Json?   @map("working_hours_json")
+  holidaysJson   Json?     @map("holidays_json")
+  settingsJson   Json?     @map("settings_json")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  users             User[]
+  teams             Team[]
+  roles             Role[]
+  projects          Project[]
+  leads             Lead[]
+  leadSources       LeadSource[]
+  campaigns         Campaign[]
+  customers         Customer[]
+  bookings          Booking[]
+  brokers           Broker[]
+  drivers           Driver[]
+  offers            Offer[]
+  paymentPlanTemplates PaymentPlanTemplate[]
+  tickets           Ticket[]
+  templates         Template[]
+  documentTemplates DocumentTemplate[]
+  sequences         Sequence[]
+  broadcasts        Broadcast[]
+  conversations     Conversation[]
+  phoneNumbers      PhoneNumber[]
+  ivrFlows          IvrFlow[]
+  approvalRequests  ApprovalRequest[]
+  auditLogs         AuditLog[]
+  apiKeys           ApiKey[]
+  webhooks          Webhook[]
+  customFieldDefs   CustomFieldDef[]
+  notifications     Notification[]
+
+  @@map("companies")
+}
+
+/// Permission matrix from §3.2 lives in Role.permissionsJson; custom roles clone
+/// a base RoleCode and override.
+model Role {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId       String   @map("company_id") @db.ObjectId
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  code            RoleCode
+  name            String
+  isSystem        Boolean  @default(false) @map("is_system")
+  /// { "leads": ["C","R","U"], "scope": "team", "fields": { "leadPhone": false } }
+  permissionsJson Json     @map("permissions_json")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  users       User[]
+  permissions Permission[]
+
+  @@unique([companyId, name])
+  @@index([companyId, code])
+  @@map("roles")
+}
+
+/// Normalised permission rows. Kept alongside Role.permissionsJson so the matrix
+/// editor can query and diff individual grants.
+model Permission {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  roleId   String  @map("role_id") @db.ObjectId
+  role     Role    @relation(fields: [roleId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  resource String
+  action   String
+  scope    String  @default("all")
+  allowed  Boolean @default(true)
+
+  @@unique([roleId, resource, action])
+  @@map("permissions")
+}
+
+model User {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String    @map("company_id") @db.ObjectId
+  company  Company    @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  name     String
+  email    String
+  phone    String
+  passwordHash String? @map("password_hash")
+  avatarUrl String?   @map("avatar_url")
+  status   UserStatus @default(INVITED)
+
+  roleId String @map("role_id") @db.ObjectId
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  teamId String? @map("team_id") @db.ObjectId
+  team   Team?   @relation("TeamMembers", fields: [teamId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  managerId String? @map("manager_id") @db.ObjectId
+  manager   User?   @relation("UserManager", fields: [managerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  reports   User[]  @relation("UserManager")
+
+  /// §17.2 — the IVR line this user dials out on.
+  outboundLineId String?      @map("outbound_line_id") @db.ObjectId
+  outboundLine   PhoneNumber? @relation("UserOutboundLine", fields: [outboundLineId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  dailyLeadCap  Int?      @map("daily_lead_cap")
+  shiftStart    String?   @map("shift_start")
+  shiftEnd      String?   @map("shift_end")
+  onLeaveUntil  DateTime? @map("on_leave_until")
+  twoFactorEnabled Boolean @default(false) @map("two_factor_enabled")
+  twoFactorSecret  String? @map("two_factor_secret")
+  lastLoginAt   DateTime? @map("last_login_at")
+  /// Monthly targets: { "leads": 120, "visits": 30, "bookings": 5, "value": "50000000" }
+  targetsJson   Json?     @map("targets_json")
+  preferencesJson Json?   @map("preferences_json")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  teamsLed             Team[]              @relation("TeamLead")
+  projectMemberships   ProjectMember[]
+  ownedLeads           Lead[]              @relation("LeadOwner")
+  assignedTasks        Task[]              @relation("TaskAssignee")
+  notes                Note[]              @relation("NoteAuthor")
+  siteVisits           SiteVisit[]         @relation("VisitExec")
+  holds                Hold[]              @relation("HoldUser")
+  unitStatusChanges    UnitStatusHistory[] @relation("UnitStatusActor")
+  costSheets           CostSheet[]         @relation("CostSheetPreparedBy")
+  tokensReceived       Token[]             @relation("TokenReceivedBy")
+  bookingsAsExec       Booking[]           @relation("BookingExec")
+  approvalsRequested   ApprovalRequest[]   @relation("ApprovalRequester")
+  approvalsToDecide    ApprovalRequest[]   @relation("ApprovalApprover")
+  receiptsRecorded     Receipt[]           @relation("ReceiptReceivedBy")
+  assignedTickets      Ticket[]            @relation("TicketAssignee")
+  conversations        Conversation[]      @relation("ConversationAssignee")
+  calls                Call[]              @relation("CallAgent")
+  callbacks            Callback[]          @relation("CallbackAssignee")
+  notifications        Notification[]
+  notificationPreferences NotificationPreference[]
+  sessions             Session[]
+
+  @@unique([companyId, email])
+  @@index([companyId, status])
+  @@index([companyId, teamId])
+  @@map("users")
+}
+
+/// §17.3 — hierarchical: Sales › Team A.
+model Session {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  userId String @map("user_id") @db.ObjectId
+  user   User   @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  tokenHash String @unique @map("token_hash")
+  userAgent String? @map("user_agent")
+  ipAddress String? @map("ip_address")
+  expiresAt DateTime @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  lastUsedAt DateTime? @map("last_used_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([userId, revokedAt, expiresAt])
+  @@map("sessions")
+}
+
+model Team {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  name      String
+
+  parentId String? @map("parent_id") @db.ObjectId
+  parent   Team?   @relation("TeamTree", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  children Team[]  @relation("TeamTree")
+
+  leadUserId String? @map("lead_user_id") @db.ObjectId
+  leadUser   User?   @relation("TeamLead", fields: [leadUserId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  targetsJson Json? @map("targets_json")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  members User[] @relation("TeamMembers")
+
+  @@unique([companyId, name])
+  @@map("teams")
+}
+
+// ===========================================================================
+// 2. PROJECTS (§6)
+// ===========================================================================
+
+model Project {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  name          String
+  /// 2–6 chars, unique per company, used in unit codes (GV2-A-014).
+  shortCode     String        @map("short_code")
+  ownershipType OwnershipType @map("ownership_type")
+  /// A2: for PARTNER projects the developer is another builder.
+  developerName String?       @map("developer_name")
+  type          ProjectType
+  status        ProjectStatus @default(DRAFT)
+  statusReason  String?       @map("status_reason")
+  description   String?
+  coverImageUrl String?       @map("cover_image_url")
+  galleryJson   Json?         @map("gallery_json")
+
+  addressLine String? @map("address_line")
+  locality    String?
+  city        String  @default("Jaipur")
+  state       String  @default("Rajasthan")
+  pincode     String?
+  latitude    Float?
+  longitude   Float?
+  landmarksJson Json?  @map("landmarks_json")
+  distancesJson Json?  @map("distances_json")
+
+  reraNumber        String?   @map("rera_number")
+  reraValidTill     DateTime? @map("rera_valid_till")
+  approvalAuthority String?   @map("approval_authority")
+  approvalNumber    String?   @map("approval_number")
+  approvalDate      DateTime? @map("approval_date")
+  landArea          Float?  @map("land_area")
+  landAreaUnit      String?   @map("land_area_unit")
+  khasraNumbersJson Json?     @map("khasra_numbers_json")
+  possessionDate    DateTime? @map("possession_date")
+  launchDate        DateTime? @map("launch_date")
+
+  hierarchyTemplate HierarchyTemplate? @map("hierarchy_template")
+
+  /// §6.3 Team & Settings — per-project overrides of the global defaults.
+  unitCodeFormat    String  @default("{PROJ}-{BLOCK}-{NUM:3}") @map("unit_code_format")
+  holdDurationHours Int     @default(48) @map("hold_duration_hours")
+  maxHoldsPerExec   Int     @default(3) @map("max_holds_per_exec")
+  tokenValidityDays Int     @default(7) @map("token_validity_days")
+  minTokenAmount    BigInt? @map("min_token_amount")
+  visibleToBrokers  Boolean @default(false) @map("visible_to_brokers")
+  showPricesToBrokers Boolean @default(false) @map("show_prices_to_brokers")
+  defaultBrokeragePct Float? @map("default_brokerage_pct")
+  leadAssignmentRule  String?  @map("lead_assignment_rule")
+  visitSlotConfigJson Json?    @map("visit_slot_config_json")
+  /// §9.6 field check-in geofence, metres.
+  geofenceRadiusM   Int      @default(500) @map("geofence_radius_m")
+  amenitiesJson     Json?    @map("amenities_json")
+  bankTieUpsJson    Json?    @map("bank_tie_ups_json")
+  brochureUrl       String?  @map("brochure_url")
+  layoutPlanUrl     String?  @map("layout_plan_url")
+
+  createdById String?   @map("created_by_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  blocks        Block[]
+  units         Unit[]
+  rateCards     RateCard[]
+  plcs          Plc[]
+  members       ProjectMember[]
+  milestones    Milestone[]
+  leads         Lead[]
+  siteVisits    SiteVisit[]
+  bookings      Booking[]
+  costSheets    CostSheet[]
+  holds         Hold[]
+  tokens        Token[]
+  brokerProjects BrokerProject[]
+  documentTemplates DocumentTemplate[]
+  campaigns     Campaign[]
+  phoneNumbers  PhoneNumber[]
+
+  @@unique([companyId, shortCode])
+  @@index([companyId, status])
+  @@index([companyId, city])
+  @@map("projects")
+}
+
+/// Sales team assigned to a project (§6.2 step 6).
+model ProjectMember {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  projectId String  @map("project_id") @db.ObjectId
+  project   Project @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  userId    String  @map("user_id") @db.ObjectId
+  user      User    @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  inRoundRobin Boolean @default(true) @map("in_round_robin")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([projectId, userId])
+  @@map("project_members")
+}
+
+/// Block A/B for plots, Tower T1 for apartments.
+model Block {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  projectId String  @map("project_id") @db.ObjectId
+  project   Project @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  name      String
+  code      String
+  sortOrder Int     @default(0) @map("sort_order")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  floors Floor[]
+  units  Unit[]
+
+  @@unique([projectId, name])
+  @@index([companyId])
+  @@map("blocks")
+}
+
+/// Apartments only: Project → Tower → Floor → Flat.
+model Floor {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  blockId   String  @map("block_id") @db.ObjectId
+  block     Block   @relation(fields: [blockId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  number    Int
+  name      String?
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  units Unit[]
+
+  @@unique([blockId, number])
+  @@index([companyId])
+  @@map("floors")
+}
+
+// ===========================================================================
+// 3. INVENTORY (§7)
+// ===========================================================================
+
+model Unit {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  projectId String  @map("project_id") @db.ObjectId
+  project   Project @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  blockId   String  @map("block_id") @db.ObjectId
+  block     Block   @relation(fields: [blockId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  floorId   String? @map("floor_id") @db.ObjectId
+  floor     Floor?  @relation(fields: [floorId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  /// GV2-A-014. Unique per company — see partial-index migration for the
+  /// soft-delete-aware constraint.
+  unitCode String @map("unit_code")
+  number   String
+
+  area        Float
+  areaUnit    String   @default("SQ_YD") @map("area_unit")
+  lengthFt    Float? @map("length_ft")
+  widthFt     Float? @map("width_ft")
+  facing      Facing?
+  roadWidthFt Int?     @map("road_width_ft")
+  /// ["CORNER","PARK_FACING","ROAD_60FT"] — drives automatic PLC application.
+  attributesJson Json? @map("attributes_json")
+  carpetArea    Float? @map("carpet_area")
+  builtUpArea   Float? @map("built_up_area")
+  superArea     Float? @map("super_area")
+  parkingCount  Int?     @map("parking_count")
+  viewNote      String?  @map("view_note")
+
+  /// §7.6 — written ONLY by the unit status service.
+  status           UnitStatus        @default(AVAILABLE)
+  notForSaleReason NotForSaleReason? @map("not_for_sale_reason")
+  /// Snapshot taken when the unit left AVAILABLE, so a rate card publish cannot
+  /// move the price of a blocked or booked unit.
+  lockedPriceJson  Json?             @map("locked_price_json")
+  lockedRateCardId String?           @map("locked_rate_card_id")
+  lockedAt         DateTime?         @map("locked_at")
+  /// Set when a cancellation returns the unit to AVAILABLE (§7.6).
+  isReReleased     Boolean           @default(false) @map("is_re_released")
+  availableSince   DateTime?         @map("available_since")
+
+  /// Optimistic lock — stale writes return 409 (§23).
+  version   Int       @default(0)
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  polygon       UnitPolygon?
+  statusHistory UnitStatusHistory[]
+  holds         Hold[]
+  tokens        Token[]
+  costSheets    CostSheet[]
+  bookings      Booking[]
+  shortlistedBy LeadShortlist[]
+
+  @@index([companyId, projectId, status])
+  @@index([projectId, blockId, number])
+  @@index([status, availableSince])
+  @@map("units")
+}
+
+/// §7.4 — coordinates normalised 0–1 so the layout image can be replaced with a
+/// higher-resolution scan without remapping every plot.
+model UnitPolygon {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  unitId    String  @unique @map("unit_id") @db.ObjectId
+  unit      Unit    @relation(fields: [unitId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  /// [[x,y],[x,y],…] each 0–1 relative to the layout image.
+  pointsJson Json   @map("points_json")
+  labelX    Float? @map("label_x")
+  labelY    Float? @map("label_y")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([companyId])
+  @@map("unit_polygons")
+}
+
+/// §7.6 — every status transition writes one row. Never deleted.
+model UnitStatusHistory {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String     @map("company_id") @db.ObjectId
+  unitId    String     @map("unit_id") @db.ObjectId
+  unit      Unit       @relation(fields: [unitId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  fromStatus UnitStatus? @map("from_status")
+  toStatus   UnitStatus  @map("to_status")
+  reason     String?
+  /// Null when the transition was made by an expiry job rather than a person.
+  changedById String?    @map("changed_by_id") @db.ObjectId
+  changedBy   User?      @relation("UnitStatusActor", fields: [changedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  actorType   ActorType  @default(USER) @map("actor_type")
+  leadId      String?    @map("lead_id") @db.ObjectId
+  bookingId   String?    @map("booking_id") @db.ObjectId
+  createdAt   DateTime   @default(now()) @map("created_at")
+
+  @@index([unitId, createdAt])
+  @@index([companyId])
+  @@map("unit_status_history")
+}
+
+model RateCard {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  projectId String  @map("project_id") @db.ObjectId
+  project   Project @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  version       Int
+  status        RateCardStatus @default(DRAFT)
+  effectiveFrom DateTime?      @map("effective_from")
+  pricingBasis  PricingBasis   @map("pricing_basis")
+  baseRate      BigInt         @map("base_rate")
+  /// Rajasthan defaults: 6% male, 5% female (§6.2 step 5).
+  stampDutyMalePct   Float @default(6) @map("stamp_duty_male_pct")
+  stampDutyFemalePct Float @default(5) @map("stamp_duty_female_pct")
+  registrationPct    Float @default(1) @map("registration_pct")
+
+  publishedAt   DateTime? @map("published_at")
+  publishedById String?   @map("published_by_id")
+  createdById   String?   @map("created_by_id")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  charges    RateCardCharge[]
+  costSheets CostSheet[]
+
+  @@unique([projectId, version])
+  @@index([companyId, status])
+  @@map("rate_cards")
+}
+
+model RateCardCharge {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  rateCardId String      @map("rate_card_id") @db.ObjectId
+  rateCard   RateCard    @relation(fields: [rateCardId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  name       String
+  basis      ChargeBasis
+  amount     BigInt
+  taxable    Boolean     @default(false)
+  gstPct     Float?    @map("gst_pct")
+  sortOrder  Int         @default(0) @map("sort_order")
+
+  @@index([rateCardId])
+  @@map("rate_card_charges")
+}
+
+/// Preferential Location Charge master. Corner 5%, park facing 5%, 60ft road 3%.
+model Plc {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  projectId String  @map("project_id") @db.ObjectId
+  project   Project @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  name      String
+  /// Matches a value in Unit.attributesJson so PLCs auto-apply.
+  attributeKey String  @map("attribute_key")
+  type      PlcType
+  value     BigInt
+  active    Boolean @default(true)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([projectId, attributeKey])
+  @@index([companyId])
+  @@map("plcs")
+}
+
+/// §7.6 — at most ONE active hold per unit. Enforced by a partial unique index,
+/// see the partial-index migration. Redis holds the TTL; this row is the record.
+model Hold {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  projectId String  @map("project_id") @db.ObjectId
+  project   Project @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  unitId    String  @map("unit_id") @db.ObjectId
+  unit      Unit    @relation(fields: [unitId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  /// A hold without a lead is not allowed (§7.6).
+  leadId    String  @map("lead_id") @db.ObjectId
+  lead      Lead    @relation(fields: [leadId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  heldById String @map("held_by_id") @db.ObjectId
+  heldBy   User   @relation("HoldUser", fields: [heldById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  status         HoldStatus @default(ACTIVE)
+  reason         String?
+  expiresAt      DateTime   @map("expires_at")
+  extensionsUsed Int        @default(0) @map("extensions_used")
+  releasedAt     DateTime?  @map("released_at")
+  releaseNote    String?    @map("release_note")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([unitId, status])
+  @@index([companyId, status, expiresAt])
+  @@index([heldById, status])
+  @@map("holds")
+}
+
+// ===========================================================================
+// 4. LEADS (§8)
+// ===========================================================================
+
+model LeadSource {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  name      String
+  group     String?
+  /// §8.9 scoring weight: portal 10, referral 20, walk-in 25, IVR 15, broker 15.
+  scoreWeight Int    @default(10) @map("score_weight")
+  defaultAssignmentRule String? @map("default_assignment_rule")
+  active    Boolean @default(true)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  leads     Lead[]
+  campaigns Campaign[]
+
+  @@unique([companyId, name])
+  @@map("lead_sources")
+}
+
+model Lead {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  name      String
+  /// Unique per company among non-merged leads — partial index, see migration.
+  phone     String
+  altPhone  String? @map("alt_phone")
+  email     String?
+  city      String?
+  languagePreference String? @map("language_preference")
+
+  stage       LeadStage   @default(NEW)
+  temperature Temperature @default(COLD)
+  /// 0–100, recomputed on events (§8.9).
+  score       Int         @default(0)
+  scoreBreakdownJson Json? @map("score_breakdown_json")
+
+  lostReason      LostReason? @map("lost_reason")
+  lostNote        String?     @map("lost_note")
+  competitorName  String?     @map("competitor_name")
+  reEngageAfter   DateTime?   @map("re_engage_after")
+
+  ownerId String? @map("owner_id") @db.ObjectId
+  owner   User?   @relation("LeadOwner", fields: [ownerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  projectId String?  @map("project_id") @db.ObjectId
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  sourceId String?     @map("source_id") @db.ObjectId
+  source   LeadSource? @relation(fields: [sourceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  campaignId String?   @map("campaign_id") @db.ObjectId
+  campaign   Campaign? @relation(fields: [campaignId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  /// §12.3 — broker tagging and the protection window.
+  brokerId          String?   @map("broker_id") @db.ObjectId
+  broker            Broker?   @relation(fields: [brokerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  brokerTaggedAt    DateTime? @map("broker_tagged_at")
+  protectionEndsAt  DateTime? @map("protection_ends_at")
+
+  utmJson       Json?     @map("utm_json")
+  firstTouchAt  DateTime? @map("first_touch_at")
+  /// §17.6 — first response SLA, 5 min for portals and IVR.
+  slaDueAt      DateTime? @map("sla_due_at")
+  firstResponseAt DateTime? @map("first_response_at")
+  slaBreached   Boolean   @default(false) @map("sla_breached")
+  lastActivityAt DateTime? @map("last_activity_at")
+  nextFollowUpAt DateTime? @map("next_follow_up_at")
+  /// §8.7.2 — set when a lead is left without a next step.
+  hasNoNextStep Boolean   @default(false) @map("has_no_next_step")
+  isStale       Boolean   @default(false) @map("is_stale")
+
+  /// §8.8 — the loser of a merge points at the survivor and stops being unique.
+  mergedIntoId String? @map("merged_into_id") @db.ObjectId
+  mergedInto   Lead?   @relation("LeadMerge", fields: [mergedIntoId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  mergedFrom   Lead[]  @relation("LeadMerge")
+
+  /// DPDP Act consent logging (§25).
+  consentText     String?   @map("consent_text")
+  consentAt       DateTime? @map("consent_at")
+  marketingOptOut Boolean   @default(false) @map("marketing_opt_out")
+  dnd             Boolean   @default(false)
+
+  customerId String?   @map("customer_id") @db.ObjectId
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  createdById String?   @map("created_by_id")
+  version     Int       @default(0)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  requirement   LeadRequirement?
+  shortlists    LeadShortlist[]
+  tasks         Task[]
+  notes         Note[]
+  siteVisits    SiteVisit[]
+  holds         Hold[]
+  costSheets    CostSheet[]
+  tokens        Token[]
+  bookings      Booking[]
+  conversations Conversation[]
+  calls         Call[]
+  callbacks     Callback[]
+  enrolments    Enrolment[]
+  disputes      LeadDispute[]
+
+  @@index([companyId, stage])
+  @@index([companyId, ownerId, stage])
+  @@index([companyId, phone])
+  @@index([companyId, nextFollowUpAt])
+  @@index([companyId, slaDueAt])
+  @@map("leads")
+}
+
+model LeadRequirement {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  leadId    String  @unique @map("lead_id") @db.ObjectId
+  lead      Lead    @relation(fields: [leadId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  budgetMin   BigInt?  @map("budget_min")
+  budgetMax   BigInt?  @map("budget_max")
+  areaMin     Float? @map("area_min")
+  areaMax     Float? @map("area_max")
+  facingsJson Json?    @map("facings_json")
+  attributesJson Json? @map("attributes_json")
+  /// Immediate / 1-3 months / 3-6 months / 6+ months — drives scoring.
+  timeline    String?
+  purpose     String?
+  notes       String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([companyId])
+  @@map("lead_requirements")
+}
+
+/// Units a lead has shortlisted — surfaced in the unit drawer as "interested
+/// leads" so two execs do not negotiate the same plot (§7.3).
+model LeadShortlist {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String   @map("company_id") @db.ObjectId
+  leadId    String   @map("lead_id") @db.ObjectId
+  lead      Lead     @relation(fields: [leadId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  unitId    String   @map("unit_id") @db.ObjectId
+  unit      Unit     @relation(fields: [unitId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([leadId, unitId])
+  @@index([companyId])
+  @@map("lead_shortlists")
+}
+
+/// Polymorphic timeline (decision 6). entityType is one of
+/// LEAD | UNIT | BOOKING | CUSTOMER | SITE_VISIT | BROKER | TICKET.
+model Activity {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId  String    @map("company_id") @db.ObjectId
+  entityType String    @map("entity_type")
+  entityId   String    @map("entity_id")
+  type       String
+  summary    String
+  dataJson   Json?     @map("data_json")
+  actorType  ActorType @default(USER) @map("actor_type")
+  actorId    String?   @map("actor_id")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([entityType, entityId, createdAt])
+  @@index([companyId, createdAt])
+  @@map("activities")
+}
+
+model Task {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  leadId    String? @map("lead_id") @db.ObjectId
+  lead      Lead?   @relation(fields: [leadId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  bookingId String? @map("booking_id") @db.ObjectId
+  booking   Booking? @relation(fields: [bookingId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  type       TaskType
+  status     TaskStatus @default(OPEN)
+  title      String?
+  note       String?
+  dueAt      DateTime   @map("due_at")
+  reminderMinutesBefore Int? @map("reminder_minutes_before")
+  snoozedUntil DateTime? @map("snoozed_until")
+  completedAt  DateTime? @map("completed_at")
+
+  disposition     DispositionCode?
+  dispositionNote String?          @map("disposition_note")
+
+  assigneeId String @map("assignee_id") @db.ObjectId
+  assignee   User   @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  createdById String?   @map("created_by_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  @@index([companyId, assigneeId, status, dueAt])
+  @@index([leadId])
+  @@map("tasks")
+}
+
+model Note {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  leadId    String? @map("lead_id") @db.ObjectId
+  lead      Lead?   @relation(fields: [leadId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  bookingId String? @map("booking_id") @db.ObjectId
+  booking   Booking? @relation(fields: [bookingId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  body        String
+  isInternal  Boolean @default(true) @map("is_internal")
+  attachmentsJson Json? @map("attachments_json")
+  mentionsJson    Json? @map("mentions_json")
+
+  authorId String @map("author_id") @db.ObjectId
+  author   User   @relation("NoteAuthor", fields: [authorId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  @@index([companyId, leadId])
+  @@map("notes")
+}
+
+// ===========================================================================
+// 5. SITE VISITS (§9)
+// ===========================================================================
+
+/// §9.2 — drivers are a lightweight record (name + phone), not full users.
+model Driver {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  name      String
+  phone     String
+  vehicleNumber String? @map("vehicle_number")
+  active    Boolean @default(true)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  siteVisits SiteVisit[]
+
+  @@index([companyId, active])
+  @@map("drivers")
+}
+
+model SiteVisit {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  leadId    String  @map("lead_id") @db.ObjectId
+  lead      Lead    @relation(fields: [leadId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  projectId String  @map("project_id") @db.ObjectId
+  project   Project @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  execId String @map("exec_id") @db.ObjectId
+  exec   User   @relation("VisitExec", fields: [execId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  scheduledAt DateTime    @map("scheduled_at")
+  slotMinutes Int         @default(30) @map("slot_minutes")
+  type        VisitType   @default(SITE)
+  status      VisitStatus @default(SCHEDULED)
+
+  pickupRequired Boolean   @default(false) @map("pickup_required")
+  pickupAddress  String?   @map("pickup_address")
+  pickupAt       DateTime? @map("pickup_at")
+  driverId       String?   @map("driver_id") @db.ObjectId
+  driver         Driver?   @relation(fields: [driverId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  attendeesCount Int?    @map("attendees_count")
+  notes          String?
+  /// Units the exec pinned to show (§9.3).
+  unitsToShowJson Json?  @map("units_to_show_json")
+
+  confirmedAt DateTime? @map("confirmed_at")
+  /// §9.6 — GPS check-in inside the project geofence.
+  checkedInAt   DateTime? @map("checked_in_at")
+  checkInLat    Float?  @map("check_in_lat")
+  checkInLng    Float?  @map("check_in_lng")
+  checkInOutsideGeofence Boolean @default(false) @map("check_in_outside_geofence")
+  checkInReason String?   @map("check_in_reason")
+  checkInPhotoUrl String? @map("check_in_photo_url")
+
+  /// Set when this visit was created by rescheduling an earlier one.
+  rescheduledFromId String?    @map("rescheduled_from_id") @db.ObjectId
+  rescheduledFrom   SiteVisit? @relation("VisitReschedule", fields: [rescheduledFromId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  rescheduledTo     SiteVisit[] @relation("VisitReschedule")
+
+  brokerId String? @map("broker_id") @db.ObjectId
+  broker   Broker? @relation(fields: [brokerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  cancelledAt     DateTime? @map("cancelled_at")
+  cancelReason    String?   @map("cancel_reason")
+  remindersSentJson Json?   @map("reminders_sent_json")
+
+  createdById String?   @map("created_by_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  outcome SiteVisitOutcome?
+
+  @@index([companyId, scheduledAt])
+  @@index([companyId, execId, status])
+  @@index([projectId, scheduledAt])
+  @@map("site_visits")
+}
+
+model SiteVisitOutcome {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId   String    @map("company_id") @db.ObjectId
+  siteVisitId String    @unique @map("site_visit_id") @db.ObjectId
+  siteVisit   SiteVisit @relation(fields: [siteVisitId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  result        VisitResult
+  budgetFit     BudgetFit?  @map("budget_fit")
+  /// ["PRICE","LOCATION","SIZE","FACING","POSSESSION","LOAN","OTHER"]
+  objectionsJson Json?      @map("objections_json")
+  preferredUnitsJson Json?  @map("preferred_units_json")
+  nextStep      String      @map("next_step")
+  nextFollowUpAt DateTime   @map("next_follow_up_at")
+  notes         String?
+  photosJson    Json?       @map("photos_json")
+
+  submittedById String?  @map("submitted_by_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([companyId])
+  @@map("site_visit_outcomes")
+}
+
+// ===========================================================================
+// 6. QUOTATION, DISCOUNT, TOKEN & BOOKING (§10)
+// ===========================================================================
+
+model CostSheet {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  projectId String  @map("project_id") @db.ObjectId
+  project   Project @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  leadId    String  @map("lead_id") @db.ObjectId
+  lead      Lead    @relation(fields: [leadId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  unitId    String  @map("unit_id") @db.ObjectId
+  unit      Unit    @relation(fields: [unitId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  rateCardId String   @map("rate_card_id") @db.ObjectId
+  rateCard   RateCard @relation(fields: [rateCardId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  version       Int    @default(1)
+  applicantName String @map("applicant_name")
+
+  baseCost      BigInt  @map("base_cost")
+  plcTotal      BigInt  @default(0) @map("plc_total")
+  chargesTotal  BigInt  @default(0) @map("charges_total")
+  gstAmount     BigInt  @default(0) @map("gst_amount")
+  discountAmount BigInt @default(0) @map("discount_amount")
+  discountPct   Float? @map("discount_pct")
+  agreementValue BigInt @map("agreement_value")
+  stampDuty     BigInt  @default(0) @map("stamp_duty")
+  registration  BigInt  @default(0) @map("registration")
+  totalCost     BigInt  @map("total_cost")
+  /// Full line-by-line breakup as rendered on the PDF.
+  breakupJson   Json    @map("breakup_json")
+
+  paymentPlanTemplateId String? @map("payment_plan_template_id")
+  loanAssumed  Boolean  @default(false) @map("loan_assumed")
+  loanPct      Float? @map("loan_pct")
+  emiEstimate  BigInt?  @map("emi_estimate")
+
+  validUntil DateTime? @map("valid_until")
+  /// Watermarked "Indicative" while a discount approval is pending (§10.1).
+  isIndicative Boolean  @default(false) @map("is_indicative")
+  /// Set when a newer rate card is published (§6.3).
+  isOutdated   Boolean  @default(false) @map("is_outdated")
+  pdfUrl       String?  @map("pdf_url")
+  shareToken   String?  @unique @map("share_token")
+  viewCount    Int      @default(0) @map("view_count")
+  firstViewedAt DateTime? @map("first_viewed_at")
+
+  preparedById String @map("prepared_by_id") @db.ObjectId
+  preparedBy   User   @relation("CostSheetPreparedBy", fields: [preparedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  offerIds String[] @db.ObjectId @map("offer_ids")
+  offers   Offer[]  @relation("CostSheetOffers", fields: [offerIds], references: [id])
+  negotiations Negotiation[]
+
+  @@index([companyId, leadId])
+  @@index([unitId])
+  @@map("cost_sheets")
+}
+
+/// §10.2 — the negotiation ladder: what the customer asked, what we offered.
+model Negotiation {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId   String    @map("company_id") @db.ObjectId
+  costSheetId String    @map("cost_sheet_id") @db.ObjectId
+  costSheet   CostSheet @relation(fields: [costSheetId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  customerAsked BigInt? @map("customer_asked")
+  weOffered     BigInt? @map("we_offered")
+  notes         String?
+  loggedById    String? @map("logged_by_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([costSheetId, createdAt])
+  @@index([companyId])
+  @@map("negotiations")
+}
+
+/// §17.11 — offer definitions, optionally auto-applied.
+model Offer {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  name      String
+  type      OfferType
+  value     BigInt?
+  freeItem  String?   @map("free_item")
+  validFrom DateTime? @map("valid_from")
+  validTo   DateTime? @map("valid_to")
+  projectIdsJson Json? @map("project_ids_json")
+  autoApply Boolean  @default(false) @map("auto_apply")
+  active    Boolean  @default(true)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  costSheetIds String[]    @db.ObjectId @map("cost_sheet_ids")
+  costSheets   CostSheet[] @relation("CostSheetOffers", fields: [costSheetIds], references: [id])
+  bookingIds   String[]    @db.ObjectId @map("booking_ids")
+  bookings     Booking[]   @relation("BookingOffers", fields: [bookingIds], references: [id])
+
+  @@unique([companyId, name])
+  @@map("offers")
+}
+
+/// §10.3 — one engine for discounts, hold extensions, rate cards, bookings,
+/// cancellations, refunds and broker payouts. SLA 4 business hours, then escalate.
+model ApprovalRequest {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  type   ApprovalType
+  status ApprovalStatus @default(PENDING)
+
+  /// Polymorphic target: LEAD | UNIT | HOLD | COST_SHEET | BOOKING | REFUND |
+  /// RATE_CARD | COMMISSION | DEMAND.
+  entityType String @map("entity_type")
+  entityId   String @map("entity_id")
+
+  requestedAmount BigInt?  @map("requested_amount")
+  requestedPct    Float? @map("requested_pct")
+  justification   String?
+  attachmentsJson Json?    @map("attachments_json")
+  /// Margin impact, exec's 30-day discount average, etc. — shown in the modal.
+  contextJson     Json?    @map("context_json")
+
+  requestedById String @map("requested_by_id") @db.ObjectId
+  requestedBy   User   @relation("ApprovalRequester", fields: [requestedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  approverId String? @map("approver_id") @db.ObjectId
+  approver   User?   @relation("ApprovalApprover", fields: [approverId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  /// Set when the approver counters with a different amount (§10.3).
+  counterAmount BigInt?  @map("counter_amount")
+  counterPct    Float? @map("counter_pct")
+  decisionNote  String?  @map("decision_note")
+  decidedAt     DateTime? @map("decided_at")
+
+  slaDueAt    DateTime? @map("sla_due_at")
+  escalatedAt DateTime? @map("escalated_at")
+  /// Second approver for dual-approval flows (refund > ₹5,00,000).
+  secondApproverId String?   @map("second_approver_id")
+  secondDecidedAt  DateTime? @map("second_decided_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([companyId, status, type])
+  @@index([approverId, status])
+  @@index([entityType, entityId])
+  @@map("approval_requests")
+}
+
+/// §10.4 — token money blocking a unit. Never auto-released on expiry.
+model Token {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  projectId String  @map("project_id") @db.ObjectId
+  project   Project @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  leadId    String  @map("lead_id") @db.ObjectId
+  lead      Lead    @relation(fields: [leadId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  unitId    String  @map("unit_id") @db.ObjectId
+  unit      Unit    @relation(fields: [unitId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  receiptNumber String      @map("receipt_number")
+  amount        BigInt
+  mode          PaymentMode
+  transactionRef String?    @map("transaction_ref")
+  chequeNumber  String?     @map("cheque_number")
+  bankName      String?     @map("bank_name")
+  receivedOn    DateTime    @map("received_on")
+  proofUrl      String?     @map("proof_url")
+
+  agreedPrice   BigInt      @map("agreed_price")
+  validUntil    DateTime    @map("valid_until")
+  status        TokenStatus @default(RECEIVED)
+  notes         String?
+  /// Razorpay link id when the token was collected online.
+  paymentLinkId String?     @map("payment_link_id")
+  pdfUrl        String?     @map("pdf_url")
+
+  receivedById String? @map("received_by_id") @db.ObjectId
+  receivedBy   User?   @relation("TokenReceivedBy", fields: [receivedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  bookings Booking[]
+
+  @@unique([companyId, receiptNumber])
+  @@index([unitId, status])
+  @@index([companyId, status, validUntil])
+  @@map("tokens")
+}
+
+model Booking {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  projectId String  @map("project_id") @db.ObjectId
+  project   Project @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  unitId    String  @map("unit_id") @db.ObjectId
+  unit      Unit    @relation(fields: [unitId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  leadId    String? @map("lead_id") @db.ObjectId
+  lead      Lead?   @relation(fields: [leadId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tokenId   String? @map("token_id") @db.ObjectId
+  token     Token?  @relation(fields: [tokenId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  customerId String?   @map("customer_id") @db.ObjectId
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  /// BK/GV2/0128
+  bookingNumber String        @map("booking_number")
+  status        BookingStatus @default(DRAFT)
+  bookedOn      DateTime?     @map("booked_on")
+
+  agreementValue BigInt  @map("agreement_value")
+  discountAmount BigInt  @default(0) @map("discount_amount")
+  /// §22 invariant — snapshot of the cost breakup taken at approval.
+  lockedPriceJson Json?  @map("locked_price_json")
+
+  brokerId      String?  @map("broker_id") @db.ObjectId
+  broker        Broker?  @relation(fields: [brokerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  brokeragePct  Float? @map("brokerage_pct")
+  brokerageAmount BigInt? @map("brokerage_amount")
+
+  fundingType FundingType @default(SELF) @map("funding_type")
+  bankName    String?     @map("bank_name")
+  loanAmount  BigInt?     @map("loan_amount")
+  loanStatus  LoanStatus  @default(NOT_APPLIED) @map("loan_status")
+  sanctionLetterUrl String? @map("sanction_letter_url")
+
+  nomineeName     String? @map("nominee_name")
+  nomineeRelation String? @map("nominee_relation")
+  nomineeDob      DateTime? @map("nominee_dob")
+  nomineeAddress  String? @map("nominee_address")
+
+  eSignMethod ESignMethod? @map("e_sign_method")
+  declarationsAccepted Boolean @default(false) @map("declarations_accepted")
+
+  /// §10.6 status stepper, each with a required document.
+  agreementSignedOn DateTime? @map("agreement_signed_on")
+  agreementUrl      String?   @map("agreement_url")
+  registeredOn      DateTime? @map("registered_on")
+  registrationNumber String?  @map("registration_number")
+  registryDeedUrl   String?   @map("registry_deed_url")
+  possessionOn      DateTime? @map("possession_on")
+  possessionLetterUrl String? @map("possession_letter_url")
+  sroOffice         String?   @map("sro_office")
+
+  /// A2 — partner projects go to the developer for confirmation (§10.5).
+  developerBookingRef String?   @map("developer_booking_ref")
+  developerStatus     String?   @map("developer_status")
+  developerLetterUrl  String?   @map("developer_letter_url")
+
+  cancelledOn        DateTime? @map("cancelled_on")
+  cancelReason       String?   @map("cancel_reason")
+  cancelRequestedBy  String?   @map("cancel_requested_by")
+  cancellationCharges BigInt?  @map("cancellation_charges")
+  refundAmount       BigInt?   @map("refund_amount")
+
+  salesExecId String? @map("sales_exec_id") @db.ObjectId
+  salesExec   User?   @relation("BookingExec", fields: [salesExecId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  approvedById String?   @map("approved_by_id")
+  approvedAt   DateTime? @map("approved_at")
+
+  version   Int       @default(0)
+  createdById String? @map("created_by_id")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  applicants  Applicant[]
+  paymentPlan PaymentPlan?
+  demands     Demand[]
+  receipts    Receipt[]
+  refunds     Refund[]
+  ledger      Ledger[]
+  commissions Commission[]
+  documents   GeneratedDocument[]
+  tickets     Ticket[]
+  tasks       Task[]
+  notes       Note[]
+  offerIds    String[] @db.ObjectId @map("offer_ids")
+  offers      Offer[]  @relation("BookingOffers", fields: [offerIds], references: [id])
+
+  @@unique([companyId, bookingNumber])
+  @@index([companyId, status])
+  @@index([projectId, status])
+  @@index([unitId])
+  @@map("bookings")
+}
+
+model Applicant {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  bookingId String  @map("booking_id") @db.ObjectId
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  isPrimary    Boolean @default(false) @map("is_primary")
+  relationship String?
+  name         String
+  fatherOrHusbandName String? @map("father_or_husband_name")
+  dob          DateTime?
+  /// Drives the stamp duty rate (§6.2 step 5).
+  gender       Gender?
+  maritalStatus MaritalStatus? @map("marital_status")
+  nationality  String?  @default("Indian")
+  isNri        Boolean  @default(false) @map("is_nri")
+
+  /// CIPHERTEXT — encrypt in the application, display masked (decision 7).
+  panEncrypted     String? @map("pan_encrypted")
+  panLast4         String? @map("pan_last4")
+  aadhaarEncrypted String? @map("aadhaar_encrypted")
+  aadhaarLast4     String? @map("aadhaar_last4")
+
+  phone      String
+  email      String?
+  occupation String?
+  employer   String?
+  currentAddress   String? @map("current_address")
+  permanentAddress String? @map("permanent_address")
+  photoUrl   String? @map("photo_url")
+
+  kycVerified   Boolean   @default(false) @map("kyc_verified")
+  kycVerifiedBy String?   @map("kyc_verified_by")
+  kycVerifiedAt DateTime? @map("kyc_verified_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  documents KycDocument[]
+
+  @@index([bookingId])
+  @@index([companyId])
+  @@map("applicants")
+}
+
+model KycDocument {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId   String     @map("company_id") @db.ObjectId
+  applicantId String     @map("applicant_id") @db.ObjectId
+  applicant   Applicant  @relation(fields: [applicantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  type        KycDocType
+  /// Private S3 key — served only through 15-minute signed URLs (§23).
+  fileKey     String     @map("file_key")
+  fileName    String?    @map("file_name")
+  sizeBytes   Int?       @map("size_bytes")
+  virusScanned Boolean   @default(false) @map("virus_scanned")
+  verified    Boolean    @default(false)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([applicantId, type])
+  @@index([companyId])
+  @@map("kyc_documents")
+}
+
+// ===========================================================================
+// 7. POST-SALES, PAYMENT PLANS & COLLECTIONS (§11)
+// ===========================================================================
+
+model Customer {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  name  String
+  phone String
+  email String?
+  /// Unique by PAN or phone (§11.1). CIPHERTEXT.
+  panEncrypted String? @map("pan_encrypted")
+  panLast4     String? @map("pan_last4")
+  addressJson  Json?   @map("address_json")
+
+  portalAccessEnabled Boolean   @default(false) @map("portal_access_enabled")
+  portalLastLoginAt   DateTime? @map("portal_last_login_at")
+  relationshipManagerId String? @map("relationship_manager_id")
+
+  /// Referral programme (§13.6).
+  referredByCustomerId String? @map("referred_by_customer_id")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  leads         Lead[]
+  bookings      Booking[]
+  tickets       Ticket[]
+  conversations Conversation[]
+  calls         Call[]
+
+  @@index([companyId, phone])
+  @@map("customers")
+}
+
+/// §11.2 — four plan types. Rows live in templateRowsJson so a template can be
+/// edited without migrating every plan generated from it.
+model PaymentPlanTemplate {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String   @map("company_id") @db.ObjectId
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  projectId String?  @map("project_id") @db.ObjectId
+  name      String
+  type      PlanType
+  /// [{ label, pctOfValue | fixedAmount, dueRule, daysAfterBooking, milestoneId,
+  ///    graceDays, interestPctPa }]
+  rowsJson  Json     @map("rows_json")
+  active    Boolean  @default(true)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  paymentPlans PaymentPlan[]
+
+  @@unique([companyId, name])
+  @@map("payment_plan_templates")
+}
+
+/// The plan actually attached to one booking, frozen at booking time.
+model PaymentPlan {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId  String  @map("company_id") @db.ObjectId
+  bookingId  String  @unique @map("booking_id") @db.ObjectId
+  booking    Booking @relation(fields: [bookingId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  templateId String? @map("template_id") @db.ObjectId
+  template   PaymentPlanTemplate? @relation(fields: [templateId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  type     PlanType
+  rowsJson Json     @map("rows_json")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([companyId])
+  @@map("payment_plans")
+}
+
+/// §11.3 — construction milestones defined per project. Marking one complete
+/// raises demands across every booking on a construction-linked plan.
+model Milestone {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  projectId String  @map("project_id") @db.ObjectId
+  project   Project @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  name        String
+  sortOrder   Int             @default(0) @map("sort_order")
+  plannedDate DateTime?       @map("planned_date")
+  actualDate  DateTime?       @map("actual_date")
+  status      MilestoneStatus @default(PLANNED)
+  photosJson  Json?           @map("photos_json")
+  completedById String?       @map("completed_by_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  demands Demand[]
+
+  @@unique([projectId, name])
+  @@index([companyId])
+  @@map("milestones")
+}
+
+model Demand {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  bookingId String  @map("booking_id") @db.ObjectId
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  milestoneId String?    @map("milestone_id") @db.ObjectId
+  milestone   Milestone? @relation(fields: [milestoneId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  /// DM/GV2/0451
+  demandNumber String       @map("demand_number")
+  sequenceNo   Int          @map("sequence_no")
+  label        String
+  pctOfValue   Float?     @map("pct_of_value")
+  amount       BigInt
+  dueDate      DateTime     @map("due_date")
+  graceDays    Int          @default(0) @map("grace_days")
+  interestPctPa Float?    @map("interest_pct_pa")
+  status       DemandStatus @default(UPCOMING)
+
+  paidAmount     BigInt @default(0) @map("paid_amount")
+  interestAccrued BigInt @default(0) @map("interest_accrued")
+  interestWaived  BigInt @default(0) @map("interest_waived")
+
+  letterUrl      String?   @map("letter_url")
+  lastReminderAt DateTime? @map("last_reminder_at")
+  remindersSent  Int       @default(0) @map("reminders_sent")
+  waivedReason   String?   @map("waived_reason")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  allocations ReceiptAllocation[]
+
+  @@unique([companyId, demandNumber])
+  @@index([bookingId, status])
+  @@index([companyId, status, dueDate])
+  @@map("demands")
+}
+
+model Receipt {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  bookingId String  @map("booking_id") @db.ObjectId
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  /// RC/GV2/1023
+  receiptNumber String        @map("receipt_number")
+  amount        BigInt
+  mode          PaymentMode
+  status        ReceiptStatus @default(RECORDED)
+
+  transactionRef String?   @map("transaction_ref")
+  chequeNumber   String?   @map("cheque_number")
+  bankName       String?   @map("bank_name")
+  instrumentDate DateTime? @map("instrument_date")
+  receivedOn     DateTime  @map("received_on")
+  proofUrl       String?   @map("proof_url")
+  remarks        String?
+
+  depositedOn DateTime? @map("deposited_on")
+  clearedOn   DateTime? @map("cleared_on")
+  bouncedOn   DateTime? @map("bounced_on")
+  bounceCharge BigInt?  @map("bounce_charge")
+  bounceReason String?  @map("bounce_reason")
+
+  /// Amount not yet allocated to a demand — an advance creates unallocated credit.
+  unallocatedAmount BigInt @default(0) @map("unallocated_amount")
+  pdfUrl String? @map("pdf_url")
+  /// Razorpay payment id when collected online.
+  paymentGatewayRef String? @map("payment_gateway_ref")
+
+  receivedById String? @map("received_by_id") @db.ObjectId
+  receivedBy   User?   @relation("ReceiptReceivedBy", fields: [receivedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  allocations ReceiptAllocation[]
+
+  @@unique([companyId, receiptNumber])
+  @@index([bookingId, status])
+  @@index([companyId, status])
+  @@map("receipts")
+}
+
+/// §11.4 — one receipt can settle several demands (oldest first by default,
+/// manually overridable), so allocation is its own table.
+model ReceiptAllocation {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  receiptId String  @map("receipt_id") @db.ObjectId
+  receipt   Receipt @relation(fields: [receiptId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  demandId  String  @map("demand_id") @db.ObjectId
+  demand    Demand  @relation(fields: [demandId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  amount    BigInt
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([receiptId, demandId])
+  @@index([demandId])
+  @@index([companyId])
+  @@map("receipt_allocations")
+}
+
+model Refund {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  bookingId String  @map("booking_id") @db.ObjectId
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  amount        BigInt
+  tdsAmount     BigInt?      @map("tds_amount")
+  status        RefundStatus @default(REQUESTED)
+  mode          PaymentMode?
+  expectedDate  DateTime?    @map("expected_date")
+  paidOn        DateTime?    @map("paid_on")
+  utr           String?
+  reason        String?
+  requestLetterUrl String?   @map("request_letter_url")
+
+  requestedById String?   @map("requested_by_id") @db.ObjectId
+  approvedById  String?   @map("approved_by_id")
+  approvedAt    DateTime? @map("approved_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([companyId, status])
+  @@index([bookingId])
+  @@map("refunds")
+}
+
+/// Running statement per booking. Not double-entry accounting (A6) — this is a
+/// customer-facing ledger only.
+model Ledger {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  bookingId String  @map("booking_id") @db.ObjectId
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  entryDate   DateTime        @map("entry_date")
+  particulars String
+  type        LedgerEntryType
+  amount      BigInt
+  balance     BigInt
+  /// DEMAND | RECEIPT | REFUND | INTEREST | BOUNCE_CHARGE | ADJUSTMENT
+  sourceType  String?  @map("source_type")
+  sourceId    String?  @map("source_id") @db.ObjectId
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([bookingId, entryDate])
+  @@index([companyId])
+  @@map("ledger_entries")
+}
+
+model Ticket {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  customerId String?   @map("customer_id") @db.ObjectId
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  bookingId  String?   @map("booking_id") @db.ObjectId
+  booking    Booking?  @relation(fields: [bookingId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  ticketNumber String         @map("ticket_number")
+  category     TicketCategory
+  priority     Priority       @default(MEDIUM)
+  status       TicketStatus   @default(OPEN)
+  subject      String
+  body         String?
+  slaDueAt     DateTime?      @map("sla_due_at")
+  resolvedAt   DateTime?      @map("resolved_at")
+  attachmentsJson Json?       @map("attachments_json")
+
+  assigneeId String? @map("assignee_id") @db.ObjectId
+  assignee   User?   @relation("TicketAssignee", fields: [assigneeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  @@unique([companyId, ticketNumber])
+  @@index([companyId, status, priority])
+  @@map("tickets")
+}
+
+// ===========================================================================
+// 8. CHANNEL PARTNERS (§12)
+// ===========================================================================
+
+model Broker {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  firmName      String? @map("firm_name")
+  contactPerson String  @map("contact_person")
+  phone         String
+  email         String?
+  reraAgentNo   String? @map("rera_agent_no")
+  /// CIPHERTEXT (decision 7).
+  panEncrypted  String? @map("pan_encrypted")
+  gstNumber     String? @map("gst_number")
+  address       String?
+  bankAccountNameEncrypted   String? @map("bank_account_name_encrypted")
+  bankAccountNumberEncrypted String? @map("bank_account_number_encrypted")
+  bankIfscEncrypted          String? @map("bank_ifsc_encrypted")
+
+  tier   BrokerTier   @default(BRONZE)
+  status BrokerStatus @default(PENDING)
+  /// §12.3 — default 60 days, renewed on a site visit the broker sourced.
+  leadProtectionDays Int @default(60) @map("lead_protection_days")
+  portalAccessEnabled Boolean @default(false) @map("portal_access_enabled")
+  portalPasswordHash  String? @map("portal_password_hash")
+  portalLastLoginAt   DateTime? @map("portal_last_login_at")
+  documentsJson       Json?   @map("documents_json")
+  agreementSignedOn   DateTime? @map("agreement_signed_on")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  projects    BrokerProject[]
+  leads       Lead[]
+  siteVisits  SiteVisit[]
+  bookings    Booking[]
+  commissions Commission[]
+  disputesA   LeadDispute[] @relation("DisputeBrokerA")
+  disputesB   LeadDispute[] @relation("DisputeBrokerB")
+
+  @@index([companyId, status])
+  @@index([companyId, phone])
+  @@map("brokers")
+}
+
+/// Empanelment, with a per-project brokerage override.
+model BrokerProject {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  brokerId  String  @map("broker_id") @db.ObjectId
+  broker    Broker  @relation(fields: [brokerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  projectId String  @map("project_id") @db.ObjectId
+  project   Project @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  brokeragePct Float? @map("brokerage_pct")
+  active    Boolean  @default(true)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([brokerId, projectId])
+  @@index([companyId])
+  @@map("broker_projects")
+}
+
+model Commission {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  brokerId  String  @map("broker_id") @db.ObjectId
+  broker    Broker  @relation(fields: [brokerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  bookingId String  @map("booking_id") @db.ObjectId
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  agreementValue BigInt           @map("agreement_value")
+  brokeragePct   Float?         @map("brokerage_pct")
+  amount         BigInt
+  status         CommissionStatus @default(ACCRUED)
+  /// Open item 6 — on X% collection, or on registration.
+  payableTrigger String?          @map("payable_trigger")
+
+  invoiceUrl    String?   @map("invoice_url")
+  invoiceNumber String?   @map("invoice_number")
+  approvedById  String?   @map("approved_by_id")
+  approvedAt    DateTime? @map("approved_at")
+  paidOn        DateTime? @map("paid_on")
+  utr           String?
+  tdsAmount     BigInt?   @map("tds_amount")
+  clawbackReason String?  @map("clawback_reason")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([bookingId, brokerId])
+  @@index([companyId, status])
+  @@map("commissions")
+}
+
+/// §12.3 — raised when two brokers, or a broker and a direct lead, claim the
+/// same phone number inside the protection window.
+model LeadDispute {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String @map("company_id") @db.ObjectId
+  leadId    String @map("lead_id") @db.ObjectId
+  lead      Lead   @relation(fields: [leadId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  brokerAId String  @map("broker_a_id") @db.ObjectId
+  brokerA   Broker  @relation("DisputeBrokerA", fields: [brokerAId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  brokerBId String? @map("broker_b_id") @db.ObjectId
+  brokerB   Broker? @relation("DisputeBrokerB", fields: [brokerBId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  status       DisputeStatus @default(OPEN)
+  awardedToBrokerId String?  @map("awarded_to_broker_id")
+  resolutionNote    String?  @map("resolution_note")
+  resolvedById      String?  @map("resolved_by_id")
+  resolvedAt        DateTime? @map("resolved_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([companyId, status])
+  @@index([leadId])
+  @@map("lead_disputes")
+}
+
+// ===========================================================================
+// 9. MARKETING & AUTOMATION (§13)
+// ===========================================================================
+
+model Campaign {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  projectId String? @map("project_id") @db.ObjectId
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  sourceId  String?     @map("source_id") @db.ObjectId
+  source    LeadSource? @relation(fields: [sourceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  name      String
+  channel   CampaignChannel
+  startDate DateTime? @map("start_date")
+  endDate   DateTime? @map("end_date")
+  budget    BigInt?
+  spend     BigInt?
+  utmJson   Json?     @map("utm_json")
+  landingPageUrl String? @map("landing_page_url")
+  /// §13.1 — a campaign can own a tracking DID.
+  trackingNumberId String? @unique @map("tracking_number_id") @db.ObjectId
+  trackingNumber   PhoneNumber? @relation("CampaignTrackingNumber", fields: [trackingNumberId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  leads        Lead[]
+  broadcasts   Broadcast[]
+  phoneNumbers PhoneNumber[] @relation("PhoneNumberCampaign")
+
+  @@unique([companyId, name])
+  @@index([companyId, channel])
+  @@map("campaigns")
+}
+
+/// WhatsApp / SMS / Email message templates (§13.2).
+model Template {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  name     String
+  channel  Channel
+  category TemplateCategory @default(UTILITY)
+  status   TemplateStatus   @default(DRAFT)
+  /// Provider-side identity: AiSensy template name, or the DLT template id.
+  providerTemplateId String? @map("provider_template_id")
+  dltTemplateId      String? @map("dlt_template_id")
+  language String  @default("en")
+  subject  String?
+  body     String
+  /// Variable → field path mapping, e.g. { "1": "lead.name" }.
+  variablesJson Json? @map("variables_json")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  broadcasts    Broadcast[]
+  sequenceSteps SequenceStep[]
+  messages      Message[]
+
+  @@unique([companyId, channel, name])
+  @@map("templates")
+}
+
+/// DOCX templates with merge fields, plus the numbering series (§17.13).
+model DocumentTemplate {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  projectId String? @map("project_id") @db.ObjectId
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  type     DocumentType
+  name     String
+  fileKey  String  @map("file_key")
+  /// {TYPE}/{PROJ}/{0000}
+  numberingFormat String? @map("numbering_format")
+  nextSequence    Int     @default(1) @map("next_sequence")
+  active   Boolean @default(true)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  generated GeneratedDocument[]
+
+  @@index([companyId, type])
+  @@map("document_templates")
+}
+
+model GeneratedDocument {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId  String  @map("company_id") @db.ObjectId
+  templateId String? @map("template_id") @db.ObjectId
+  template   DocumentTemplate? @relation(fields: [templateId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  bookingId  String? @map("booking_id") @db.ObjectId
+  booking    Booking? @relation(fields: [bookingId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  type           DocumentType
+  documentNumber String? @map("document_number")
+  fileKey        String  @map("file_key")
+  version        Int     @default(1)
+  /// Whether the customer portal shows this document (§10.6).
+  visibleToCustomer Boolean @default(false) @map("visible_to_customer")
+  mergeDataJson  Json?   @map("merge_data_json")
+
+  generatedById String?  @map("generated_by_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([companyId, type])
+  @@index([bookingId])
+  @@map("generated_documents")
+}
+
+model Sequence {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  name    String
+  trigger SequenceTrigger
+  /// { project, temperature, tag, timeWindow }
+  conditionsJson Json?   @map("conditions_json")
+  active  Boolean @default(false)
+  /// §13.3 — no messages 21:00–09:00 IST.
+  respectQuietHours Boolean @default(true) @map("respect_quiet_hours")
+  dailyCapPerLead   Int?    @map("daily_cap_per_lead")
+  exitOnReply       Boolean @default(true) @map("exit_on_reply")
+  exitOnStageChange Boolean @default(true) @map("exit_on_stage_change")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  steps      SequenceStep[]
+  enrolments Enrolment[]
+
+  @@unique([companyId, name])
+  @@map("sequences")
+}
+
+model SequenceStep {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId  String   @map("company_id") @db.ObjectId
+  sequenceId String   @map("sequence_id") @db.ObjectId
+  sequence   Sequence @relation(fields: [sequenceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  sortOrder  Int              @map("sort_order")
+  type       SequenceStepType
+  waitMinutes Int?            @map("wait_minutes")
+  templateId String?          @map("template_id") @db.ObjectId
+  template   Template?        @relation(fields: [templateId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  configJson Json?            @map("config_json")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  enrolments Enrolment[]
+
+  @@unique([sequenceId, sortOrder])
+  @@index([companyId])
+  @@map("sequence_steps")
+}
+
+/// One active enrolment per sequence per lead (§13.3).
+model Enrolment {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId  String   @map("company_id") @db.ObjectId
+  sequenceId String   @map("sequence_id") @db.ObjectId
+  sequence   Sequence @relation(fields: [sequenceId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  leadId     String   @map("lead_id") @db.ObjectId
+  lead       Lead     @relation(fields: [leadId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  status        EnrolmentStatus @default(ACTIVE)
+  currentStepId String?         @map("current_step_id") @db.ObjectId
+  currentStep   SequenceStep?   @relation(fields: [currentStepId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  nextRunAt     DateTime?       @map("next_run_at")
+  exitReason    String?         @map("exit_reason")
+  completedAt   DateTime?       @map("completed_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([sequenceId, status])
+  @@index([leadId])
+  @@index([companyId, status, nextRunAt])
+  @@map("enrolments")
+}
+
+model Broadcast {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  campaignId String?   @map("campaign_id") @db.ObjectId
+  campaign   Campaign? @relation(fields: [campaignId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  templateId String?   @map("template_id") @db.ObjectId
+  template   Template? @relation(fields: [templateId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  name        String
+  channel     Channel
+  status      BroadcastStatus @default(DRAFT)
+  /// Same filter shape as the leads and customers lists.
+  segmentJson Json?           @map("segment_json")
+  audienceCount Int?          @map("audience_count")
+  scheduledAt DateTime?       @map("scheduled_at")
+  sentAt      DateTime?       @map("sent_at")
+
+  sentCount      Int @default(0) @map("sent_count")
+  deliveredCount Int @default(0) @map("delivered_count")
+  readCount      Int @default(0) @map("read_count")
+  repliedCount   Int @default(0) @map("replied_count")
+  optOutCount    Int @default(0) @map("opt_out_count")
+  failedCount    Int @default(0) @map("failed_count")
+
+  createdById String?  @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([companyId, status])
+  @@map("broadcasts")
+}
+
+// ===========================================================================
+// 10. COMMUNICATION CENTRE (§15)
+// ===========================================================================
+
+model Conversation {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  leadId    String? @map("lead_id") @db.ObjectId
+  lead      Lead?   @relation(fields: [leadId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  customerId String?   @map("customer_id") @db.ObjectId
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  channel     Channel
+  status      ConversationStatus @default(OPEN)
+  contactValue String            @map("contact_value")
+
+  assigneeId String? @map("assignee_id") @db.ObjectId
+  assignee   User?   @relation("ConversationAssignee", fields: [assigneeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  lastMessageAt      DateTime? @map("last_message_at")
+  lastInboundAt      DateTime? @map("last_inbound_at")
+  /// §15 — the 24-hour WhatsApp session window. Outside it, only templates send.
+  sessionExpiresAt   DateTime? @map("session_expires_at")
+  unreadCount        Int       @default(0) @map("unread_count")
+  /// Highlighted at 10 min unanswered, TL notified at 30.
+  firstResponseDueAt DateTime? @map("first_response_due_at")
+  closedAt           DateTime? @map("closed_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  messages Message[]
+
+  @@index([companyId, status, lastMessageAt])
+  @@index([assigneeId, status])
+  @@index([companyId, contactValue])
+  @@map("conversations")
+}
+
+model Message {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId      String       @map("company_id") @db.ObjectId
+  conversationId String       @map("conversation_id") @db.ObjectId
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  direction MessageDirection
+  status    MessageStatus    @default(QUEUED)
+  body      String?
+  attachmentsJson Json?      @map("attachments_json")
+  templateId String?         @map("template_id") @db.ObjectId
+  template   Template?       @relation(fields: [templateId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  /// Yellow background in the thread, never sent to the customer (§15).
+  isInternalNote Boolean      @default(false) @map("is_internal_note")
+
+  /// Provider message id — the idempotency key for inbound webhooks (§23).
+  providerMessageId String?   @map("provider_message_id")
+  failureReason     String?   @map("failure_reason")
+  sentAt            DateTime? @map("sent_at")
+  deliveredAt       DateTime? @map("delivered_at")
+  readAt            DateTime? @map("read_at")
+
+  senderType ActorType @default(USER) @map("sender_type")
+  senderId   String?   @map("sender_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([companyId, providerMessageId])
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+// ===========================================================================
+// 11. TELEPHONY & IVR (§14)
+// ===========================================================================
+
+model PhoneNumber {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  projectId String? @map("project_id") @db.ObjectId
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  /// E.164.
+  number   String
+  label    String
+  purpose  NumberPurpose @default(SALES)
+  provider String        @default("EXOTEL")
+  providerNumberSid String? @map("provider_number_sid")
+  ivrFlowId String?  @map("ivr_flow_id") @db.ObjectId
+  ivrFlow   IvrFlow? @relation(fields: [ivrFlowId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  campaignId String? @map("campaign_id") @db.ObjectId
+  campaign   Campaign? @relation("PhoneNumberCampaign", fields: [campaignId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  active   Boolean  @default(true)
+  monthlyCost BigInt? @map("monthly_cost")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  calls            Call[]
+  outboundUsers    User[] @relation("UserOutboundLine")
+  campaignTracking Campaign? @relation("CampaignTrackingNumber")
+
+  @@unique([companyId, number])
+  @@index([companyId, purpose])
+  @@map("phone_numbers")
+}
+
+model IvrFlow {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  name          String
+  status        IvrFlowStatus @default(DRAFT)
+  currentVersion Int          @default(1) @map("current_version")
+  /// §14.11 — static ring group used when the provider is unreachable.
+  fallbackRouteJson Json?     @map("fallback_route_json")
+  recordingEnabled  Boolean   @default(true) @map("recording_enabled")
+  announcementEnabled Boolean @default(true) @map("announcement_enabled")
+  whisperEnabled    Boolean   @default(true) @map("whisper_enabled")
+  hoursProfileJson  Json?     @map("hours_profile_json")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  versions IvrFlowVersion[]
+  numbers  PhoneNumber[]
+
+  @@unique([companyId, name])
+  @@map("ivr_flows")
+}
+
+model IvrFlowVersion {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  flowId    String  @map("flow_id") @db.ObjectId
+  flow      IvrFlow @relation(fields: [flowId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  version   Int
+  /// The node graph: menus, ring groups, TTS, DTMF branches.
+  graphJson Json    @map("graph_json")
+  published Boolean @default(false)
+  publishedAt DateTime? @map("published_at")
+  publishedById String? @map("published_by_id")
+  /// Id returned by the telephony provider once pushed.
+  providerFlowRef String? @map("provider_flow_ref")
+
+  createdById String?  @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@unique([flowId, version])
+  @@index([companyId])
+  @@map("ivr_flow_versions")
+}
+
+model Call {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  leadId    String? @map("lead_id") @db.ObjectId
+  lead      Lead?   @relation(fields: [leadId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  customerId String?   @map("customer_id") @db.ObjectId
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  phoneNumberId String?      @map("phone_number_id") @db.ObjectId
+  phoneNumber   PhoneNumber? @relation(fields: [phoneNumberId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  direction CallDirection
+  status    CallStatus    @default(INITIATED)
+  fromNumber String       @map("from_number")
+  toNumber   String       @map("to_number")
+
+  agentId String? @map("agent_id") @db.ObjectId
+  agent   User?   @relation("CallAgent", fields: [agentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  /// "EN › GV2 › Ring group"
+  ivrPath      String?   @map("ivr_path")
+  dtmfJson     Json?     @map("dtmf_json")
+  ringSeconds  Int?      @map("ring_seconds")
+  talkSeconds  Int?      @map("talk_seconds")
+  startedAt    DateTime? @map("started_at")
+  answeredAt   DateTime? @map("answered_at")
+  endedAt      DateTime? @map("ended_at")
+  costPaise    BigInt?   @map("cost_paise")
+
+  disposition     DispositionCode?
+  dispositionNote String?          @map("disposition_note")
+  /// Skipping is blocked for 60s after hang-up (§14.6).
+  dispositionDueAt DateTime?       @map("disposition_due_at")
+
+  /// Provider call SID — the idempotency key for webhooks (§23).
+  providerCallSid String? @map("provider_call_sid")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  recording Recording?
+  voicemail Voicemail?
+  callback  Callback?
+
+  @@unique([companyId, providerCallSid])
+  @@index([companyId, status, createdAt])
+  @@index([agentId, createdAt])
+  @@index([leadId])
+  @@map("calls")
+}
+
+model Recording {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String @map("company_id") @db.ObjectId
+  callId    String @unique @map("call_id") @db.ObjectId
+  call      Call   @relation(fields: [callId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  fileKey     String  @map("file_key")
+  durationSec Int?    @map("duration_sec")
+  /// Retention default 12 months (§14.8); a job deletes past this date.
+  retainUntil DateTime? @map("retain_until")
+  /// §14.8 — TL coaching flag: GOOD | NEEDS_COACHING.
+  qualityFlag String?   @map("quality_flag")
+  qualityNote String?   @map("quality_note")
+  playCount   Int       @default(0) @map("play_count")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([companyId])
+  @@map("recordings")
+}
+
+model Voicemail {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String @map("company_id") @db.ObjectId
+  callId    String @unique @map("call_id") @db.ObjectId
+  call      Call   @relation(fields: [callId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  fileKey     String  @map("file_key")
+  durationSec Int?    @map("duration_sec")
+  transcript  String?
+  heardAt     DateTime? @map("heard_at")
+  heardById   String?   @map("heard_by_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([companyId])
+  @@map("voicemails")
+}
+
+/// §14.8 — a missed inbound call creates one of these. SLA 15 minutes in hours,
+/// reminder at 10, escalation to TL on breach.
+model Callback {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String @map("company_id") @db.ObjectId
+  callId    String @unique @map("call_id") @db.ObjectId
+  call      Call   @relation(fields: [callId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  leadId    String? @map("lead_id") @db.ObjectId
+  lead      Lead?   @relation(fields: [leadId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  status     CallbackStatus @default(OPEN)
+  slaDueAt   DateTime?      @map("sla_due_at")
+  reminderAt DateTime?      @map("reminder_at")
+  escalatedAt DateTime?     @map("escalated_at")
+  completedAt DateTime?     @map("completed_at")
+  /// Set when the customer rang back and connected before the task was worked.
+  autoClosed Boolean        @default(false) @map("auto_closed")
+
+  assigneeId String? @map("assignee_id") @db.ObjectId
+  assignee   User?   @relation("CallbackAssignee", fields: [assigneeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([companyId, status, slaDueAt])
+  @@map("callbacks")
+}
+
+// ===========================================================================
+// 12. NOTIFICATIONS (§19)
+// ===========================================================================
+
+model Notification {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  userId    String  @map("user_id") @db.ObjectId
+  user      User    @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  event    String
+  title    String
+  body     String?
+  /// Route the row navigates to when clicked.
+  linkPath String? @map("link_path")
+  channel  NotificationChannel @default(IN_APP)
+  priority Priority            @default(MEDIUM)
+  readAt   DateTime?           @map("read_at")
+  sentAt   DateTime?           @map("sent_at")
+  /// §19 — used to suppress duplicates inside a 5-minute window.
+  dedupeKey String?            @map("dedupe_key")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId, readAt, createdAt])
+  @@index([companyId, dedupeKey])
+  @@map("notifications")
+}
+
+model NotificationPreference {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String @map("company_id") @db.ObjectId
+  userId  String @map("user_id") @db.ObjectId
+  user    User   @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  event   String
+  channel NotificationChannel
+  enabled Boolean @default(true)
+
+  @@unique([userId, event, channel])
+  @@index([companyId])
+  @@map("notification_preferences")
+}
+
+// ===========================================================================
+// 13. SYSTEM (§17.20, §24)
+// ===========================================================================
+
+model AuditLog {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  actorType ActorType @default(USER) @map("actor_type")
+  actorId   String?   @map("actor_id")
+  action    String
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
+  /// Before/after diff, searchable in the audit log viewer.
+  beforeJson Json?    @map("before_json")
+  afterJson  Json?    @map("after_json")
+  ipAddress  String?  @map("ip_address")
+  userAgent  String?  @map("user_agent")
+  requestId  String?  @map("request_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([companyId, createdAt])
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+  @@map("audit_logs")
+}
+
+/// Outbound webhook subscriptions — HMAC-signed POST with retry backoff (§24).
+model Webhook {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  url        String
+  /// ["lead.created","booking.approved","receipt.recorded"]
+  eventsJson Json    @map("events_json")
+  secret     String
+  active     Boolean @default(true)
+  lastStatus Int?    @map("last_status")
+  lastAttemptAt DateTime? @map("last_attempt_at")
+  failureCount  Int       @default(0) @map("failure_count")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  @@index([companyId, active])
+  @@map("webhooks")
+}
+
+model ApiKey {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  name      String
+  /// Store only the hash; the plaintext key is shown once at creation.
+  keyHash   String  @unique @map("key_hash")
+  keyPrefix String  @map("key_prefix")
+  scopesJson Json   @map("scopes_json")
+  lastUsedAt DateTime? @map("last_used_at")
+  expiresAt  DateTime? @map("expires_at")
+  revokedAt  DateTime? @map("revoked_at")
+
+  createdById String?  @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([companyId])
+  @@map("api_keys")
+}
+
+model CustomFieldDef {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId String  @map("company_id") @db.ObjectId
+  company   Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  entity   CustomFieldEntity
+  key      String
+  label    String
+  type     CustomFieldType
+  required Boolean @default(false)
+  optionsJson Json? @map("options_json")
+  /// Roles allowed to see this field.
+  visibleToRolesJson Json? @map("visible_to_roles_json")
+  sortOrder Int    @default(0) @map("sort_order")
+  active   Boolean @default(true)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  values CustomFieldValue[]
+
+  @@unique([companyId, entity, key])
+  @@map("custom_field_defs")
+}
+
+model CustomFieldValue {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+  companyId  String         @map("company_id") @db.ObjectId
+  defId      String         @map("def_id") @db.ObjectId
+  def        CustomFieldDef @relation(fields: [defId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  /// Polymorphic, matching CustomFieldDef.entity.
+  entityId   String         @map("entity_id")
+  valueText  String?        @map("value_text")
+  valueNumber Float?      @map("value_number")
+  valueDate  DateTime?      @map("value_date")
+  valueJson  Json?          @map("value_json")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([defId, entityId])
+  @@index([companyId, entityId])
+  @@map("custom_field_values")
+}
