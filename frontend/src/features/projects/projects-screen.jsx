@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Upload } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "../../components/ui/badge";
@@ -7,8 +7,16 @@ import { Card } from "../../components/ui/card";
 import { Dialog } from "../../components/ui/dialog";
 import { Skeleton } from "../../components/ui/skeleton";
 import { useApiData } from "../../hooks/use-api-data";
+import { api } from "../../services/api";
 import { cn, money, moneyCompact } from "../../lib/utils";
 import { Screen } from "../dashboard/dashboard-screen";
+
+function resolveFileUrl(url) {
+  if (!url) return url;
+  if (/^https?:\/\//i.test(url)) return url;
+  const origin = (api.defaults.baseURL || "").replace(/\/api\/?$/, "");
+  return `${origin}${url}`;
+}
 
 const STATUS_TONE = {
   DRAFT: "slate",
@@ -32,7 +40,7 @@ function humanize(value) {
 }
 
 export function ProjectsScreen({ navigate }) {
-  const [response, , loading, error] = useApiData("/projects/summary", { kpis: {}, projects: [] });
+  const [response, , loading, error, reload] = useApiData("/projects/summary", { kpis: {}, projects: [] });
   const kpis = response.kpis || {};
   const projects = response.projects || [];
   const [rateCardProject, setRateCardProject] = useState(null);
@@ -78,7 +86,11 @@ export function ProjectsScreen({ navigate }) {
 
       {rateCardProject && <RateCardDialog project={rateCardProject} onClose={() => setRateCardProject(null)} />}
       {collateralProject && (
-        <CollateralDialog project={collateralProject} onClose={() => setCollateralProject(null)} />
+        <CollateralDialog
+          project={collateralProject}
+          onClose={() => setCollateralProject(null)}
+          onUploaded={reload}
+        />
       )}
     </Screen>
   );
@@ -305,22 +317,44 @@ const COLLATERAL_ITEMS = [
   { key: "layoutPlanUrl", label: "Layout plan", hint: "Master layout / site plan document" },
 ];
 
-function CollateralDialog({ project, onClose }) {
-  function handleUpload(label) {
-    toast.info(`S3 upload isn't connected yet — ${label} uploads will work once that's wired up.`);
+function CollateralDialog({ project, onClose, onUploaded }) {
+  const [record, setRecord] = useState(project);
+  const [busyKey, setBusyKey] = useState(null);
+  const fileInputRefs = useRef({});
+
+  async function handleFileChange(item, file) {
+    if (!file) return;
+    setBusyKey(item.key);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const uploadRes = await api.post("/uploads", formData);
+      const url = uploadRes.data.data.url;
+
+      await api.patch(`/projects/${project.id}`, { [item.key]: url });
+
+      setRecord((current) => ({ ...current, [item.key]: url }));
+      onUploaded?.();
+      toast.success(`${item.label} uploaded.`);
+    } catch (err) {
+      toast.error(err.response?.data?.error?.message || `Could not upload ${item.label}.`);
+    } finally {
+      setBusyKey(null);
+    }
   }
 
   return (
     <Dialog
       open
-      title={`Collateral — ${project.name}`}
-      description="Marketing assets for this project, stored in S3."
+      title={`Collateral — ${record.name}`}
+      description="Marketing assets for this project."
       onClose={onClose}
       className="max-w-lg"
     >
       <div className="space-y-4">
         {COLLATERAL_ITEMS.map((item) => {
-          const existingUrl = project[item.key];
+          const existingUrl = record[item.key];
+          const busy = busyKey === item.key;
           return (
             <div key={item.key} className="space-y-1.5">
               <label className="text-[13px] font-medium text-[#101418]">{item.label}</label>
@@ -333,14 +367,27 @@ function CollateralDialog({ project, onClose }) {
                     type="button"
                     variant="secondary"
                     size="sm"
-                    onClick={() => window.open(existingUrl, "_blank", "noopener,noreferrer")}
+                    onClick={() => window.open(resolveFileUrl(existingUrl), "_blank", "noopener,noreferrer")}
                   >
                     Open
                   </Button>
                 )}
-                <Button type="button" variant="secondary" size="sm" onClick={() => handleUpload(item.label)}>
+                <input
+                  ref={(el) => (fileInputRefs.current[item.key] = el)}
+                  type="file"
+                  accept="application/pdf,image/jpeg,image/png,image/webp,image/gif"
+                  className="hidden"
+                  onChange={(event) => handleFileChange(item, event.target.files?.[0])}
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => fileInputRefs.current[item.key]?.click()}
+                >
                   <Upload className="h-3.5 w-3.5" />
-                  Upload
+                  {busy ? "Uploading…" : "Upload"}
                 </Button>
               </div>
               <p className="text-[11.5px] text-[#8B93A1]">{item.hint}</p>

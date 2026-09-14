@@ -3,12 +3,14 @@ const cors = require("cors");
 const { leadRoutes } = require("./modules/leads/leads.routes");
 const { moduleRoutes } = require("./modules");
 const { authRoutes } = require("./modules/auth/auth.routes");
+const { uploadRoutes, UPLOAD_DIR } = require("./modules/uploads/uploads.routes");
 const { errorHandler } = require("./middlewares/error-handler");
 const { requestLogger } = require("./middlewares/request-logger");
 const { serializeBigInt } = require("./middlewares/serialize-bigint");
 const { requireAuth } = require("./middlewares/auth");
 const { resolveCompanyScope } = require("./middlewares/company-scope");
 const { authorizeRequest } = require("./middlewares/permissions");
+const { whatsappWebhookRoutes } = require("./modules/whatsapp/whatsapp.webhook.routes");
 
 function createApp() {
   const app = express();
@@ -23,6 +25,12 @@ function createApp() {
   });
 
   app.use("/api/auth", authRoutes);
+  // Public — called by the WhatsApp gateway itself, not a logged-in user.
+  app.use("/api/whatsapp/webhook", whatsappWebhookRoutes);
+  // Uploaded files served directly from disk; the permission boundary lives on
+  // whichever record (project, booking, ...) the returned URL gets attached to.
+  app.use("/uploads", express.static(UPLOAD_DIR));
+  app.use("/api/uploads", requireAuth, resolveCompanyScope, uploadRoutes);
   app.use("/api/leads", requireAuth, resolveCompanyScope, authorizeRequest, leadRoutes);
   app.use("/api", requireAuth, resolveCompanyScope, authorizeRequest, moduleRoutes);
   app.use(errorHandler);
