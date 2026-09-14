@@ -761,6 +761,7 @@ model User {
   notifications        Notification[]
   notificationPreferences NotificationPreference[]
   sessions             Session[]
+  otpCodes             OtpCode[]
 
   @@unique([companyId, email])
   @@index([companyId, status])
@@ -786,6 +787,24 @@ model Session {
 
   @@index([userId, revokedAt, expiresAt])
   @@map("sessions")
+}
+
+/// Email OTP login codes. Never issued for an email with no matching User —
+/// there is no public self-signup, only invited accounts can request one.
+model OtpCode {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @map("user_id") @db.ObjectId
+  user      User     @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  codeHash  String    @map("code_hash")
+  attempts  Int       @default(0)
+  expiresAt DateTime  @map("expires_at")
+  consumedAt DateTime? @map("consumed_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId, expiresAt])
+  @@map("otp_codes")
 }
 
 model Team {

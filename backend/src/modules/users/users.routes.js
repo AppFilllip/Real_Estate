@@ -3,6 +3,7 @@ const { prisma } = require("../../db/prisma");
 const { hashPassword } = require("../../utils/password");
 const { httpError } = require("../../utils/http-error");
 const { withNotDeleted } = require("../../utils/not-deleted");
+const { sendInviteEmail } = require("../email/system-emails");
 
 const userRoutes = createCrudRoutes({
   modelName: "user",
@@ -26,6 +27,10 @@ const userRoutes = createCrudRoutes({
     "targetsJson",
     "preferencesJson",
   ],
+  afterCreate: async (user) => {
+    const company = await prisma.company.findUnique({ where: { id: user.companyId } });
+    await sendInviteEmail({ to: user.email, name: user.name, companyName: company?.name });
+  },
 });
 
 // Not exposed through allowedFields above — passwordHash must only ever be

@@ -1,4 +1,5 @@
 const { withNotDeleted } = require("../utils/not-deleted");
+const { logger } = require("../utils/logger");
 
 class CrudService {
   constructor(repository, options) {
@@ -22,9 +23,18 @@ class CrudService {
     return this.repository.findById(this.buildScopedWhere({ companyId, id }));
   }
 
-  create(payload) {
+  async create(payload) {
     this.validateRequired(payload, this.options.requiredFields);
-    return this.repository.create(this.pickAllowed(payload));
+    const row = await this.repository.create(this.pickAllowed(payload));
+
+    if (this.options.afterCreate) {
+      // A notification failure shouldn't fail the record's creation.
+      this.options.afterCreate(row).catch((error) => {
+        logger.error("crud_after_create_hook_failed", { message: error.message, resource: this.options.resourceName });
+      });
+    }
+
+    return row;
   }
 
   update(companyId, id, payload) {

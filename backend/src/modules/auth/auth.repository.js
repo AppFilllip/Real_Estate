@@ -62,6 +62,31 @@ class AuthRepository {
       data: { revokedAt: new Date() },
     });
   }
+
+  findLatestOtp(userId) {
+    return this.client.otpCode.findFirst({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+    });
+  }
+
+  createOtp(data) {
+    return this.client.otpCode.create({ data });
+  }
+
+  incrementOtpAttempts(id) {
+    return this.client.otpCode.update({
+      where: { id },
+      data: { attempts: { increment: 1 } },
+    });
+  }
+
+  consumeOtp(id) {
+    return this.client.otpCode.update({
+      where: { id },
+      data: { consumedAt: new Date() },
+    });
+  }
 }
 
 module.exports = { AuthRepository };

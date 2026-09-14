@@ -20,6 +20,29 @@ class AuthController {
     }
   };
 
+  requestOtp = async (req, res, next) => {
+    try {
+      const result = await this.service.requestOtp(req.body.email);
+      res.json({ data: result });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  verifyOtp = async (req, res, next) => {
+    try {
+      const session = await this.service.verifyOtp(req.body, {
+        userAgent: req.headers["user-agent"],
+        ipAddress: req.ip,
+      });
+      setRefreshCookie(res, session.refreshToken);
+      const { refreshToken, ...data } = session;
+      res.json({ data });
+    } catch (error) {
+      next(error);
+    }
+  };
+
   refresh = async (req, res, next) => {
     try {
       const session = await this.service.refresh(getRefreshCookie(req));
