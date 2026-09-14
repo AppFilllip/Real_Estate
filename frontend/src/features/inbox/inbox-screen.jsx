@@ -74,11 +74,19 @@ export function InboxScreen() {
     const body = (text ?? draft).trim();
     if (!body || !selected) return;
     try {
-      await api.post("/messages", { conversationId: selected.id, body });
+      const res = await api.post("/messages", { conversationId: selected.id, body });
       setDraft("");
-      toast.success("Message sent.");
       reloadMessages();
       reloadConversations();
+      if (res.data?.sent) {
+        toast.success("Message sent.");
+      } else if (res.data?.error === "not_configured") {
+        toast.error(`${humanize(selected.channel)} is not connected yet.`);
+      } else if (res.data?.error === "channel_not_connected") {
+        toast.error(`${humanize(selected.channel)} replies aren't wired up here yet.`);
+      } else {
+        toast.error("Message could not be delivered.");
+      }
     } catch (err) {
       toast.error(err.response?.data?.error?.message || "Could not send message.");
     }
