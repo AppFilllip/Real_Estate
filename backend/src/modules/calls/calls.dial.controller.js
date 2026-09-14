@@ -2,11 +2,13 @@ const { prisma } = require("../../db/prisma");
 const { httpError } = require("../../utils/http-error");
 const { env } = require("../../config/env");
 const provider = require("./calls.provider");
+const { escapeXml } = require("./calls.xml");
 
-function webhookUrl(path, callId, extra = "") {
+function statusWebhookUrl(callId) {
+  if (!env.twilioWebhookBaseUrl) return null;
   const base = env.twilioWebhookBaseUrl.replace(/\/$/, "");
   const token = env.twilioWebhookToken ? `&token=${encodeURIComponent(env.twilioWebhookToken)}` : "";
-  return `${base}${path}?callId=${callId}${token}${extra}`;
+  return `${base}/api/calls/twiml/status?callId=${callId}${token}`;
 }
 
 async function resolveContact({ leadId, customerId }, companyId) {
@@ -25,9 +27,9 @@ async function resolveContact({ leadId, customerId }, companyId) {
 
 /**
  * Authenticated: POST /api/calls/dial — click-to-call.
- * Twilio rings the agent's own phone first; once they answer, the TwiML
- * webhook below bridges the call to the lead/customer's number. Nothing
- * plays in the browser — this is a real two real-phone-number bridge, not
+ * Twilio rings the agent's own phone first; once they answer, the inline
+ * TwiML below bridges the call to the lead/customer's number. Nothing plays
+ * in the browser — this is a real two real-phone-number bridge, not
  * browser/WebRTC calling.
  */
 async function dial(req, res, next) {
@@ -57,10 +59,18 @@ async function dial(req, res, next) {
       },
     });
 
+    const dialActionUrl = statusWebhookUrl(call.id);
+    const twiml =
+      `<?xml version="1.0" encoding="UTF-8"?>` +
+      `<Response><Say>Connecting your call.</Say>` +
+      `<Dial callerId="${escapeXml(env.twilioFromNumber)}"${dialActionUrl ? ` action="${escapeXml(dialActionUrl)}"` : ""}>` +
+      `<Number>${escapeXml(contact.phone)}</Number>` +
+      `</Dial></Response>`;
+
     const result = await provider.placeCall({
       to: agent.phone,
-      twimlUrl: webhookUrl("/api/calls/twiml/connect", call.id),
-      statusCallbackUrl: webhookUrl("/api/calls/twiml/status", call.id, "&leg=agent"),
+      twiml,
+      statusCallbackUrl: dialActionUrl,
     });
 
     if (!result.started) {

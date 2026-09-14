@@ -8,7 +8,6 @@ const controller = require("./calls.webhook.controller");
 const callWebhookRoutes = Router();
 callWebhookRoutes.use(express.urlencoded({ extended: false }));
 
-callWebhookRoutes.post("/connect", controller.twimlConnect);
 callWebhookRoutes.post("/status", controller.twimlStatus);
 
 module.exports = { callWebhookRoutes };
