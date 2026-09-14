@@ -2,6 +2,7 @@ const { randomUUID } = require("crypto");
 const { prisma } = require("../../db/prisma");
 const { httpError } = require("../../utils/http-error");
 const provider = require("./email.provider");
+const { plainTextToEmailHtml } = require("./format-email-html");
 
 async function resolveRecipient({ email, leadId, customerId }, companyId) {
   if (email) return email;
@@ -54,7 +55,7 @@ async function sendMessage(companyId, { leadId, customerId, email, subject, body
 
   const conversation = await findOrCreateConversation(companyId, { leadId, customerId, contactValue: resolvedEmail });
 
-  const result = await provider.sendEmail({ to: resolvedEmail, subject, body });
+  const result = await provider.sendEmail({ to: resolvedEmail, subject, body: plainTextToEmailHtml(body) });
 
   const message = await prisma.message.create({
     data: {

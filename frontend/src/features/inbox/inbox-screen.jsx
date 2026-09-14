@@ -202,7 +202,7 @@ export function InboxScreen() {
                             outbound ? "bg-[#2E5BFF] text-white" : "border border-[#E2E5EA] bg-white"
                           )}
                         >
-                          <div className="text-[13px] leading-[19px]">{message.body}</div>
+                          <div className="whitespace-pre-wrap text-[13px] leading-[19px]">{message.body}</div>
                           <div className={cn("mt-1 text-[10.5px]", outbound ? "text-[#BFCEFF]" : "text-[#8B93A1]")}>
                             {formatTime(message.sentAt || message.createdAt)}
                           </div>

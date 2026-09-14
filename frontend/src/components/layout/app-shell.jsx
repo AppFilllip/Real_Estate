@@ -33,6 +33,7 @@ import {
 import { cn } from "../../lib/utils";
 import { sections, sectionResources } from "../../lib/routes";
 import { useApiData } from "../../hooks/use-api-data";
+import { ComposeMessageDialog } from "../compose-message-dialog";
 
 function startOfMonth(date) {
   return new Date(date.getFullYear(), date.getMonth(), 1);
@@ -356,6 +357,7 @@ export function AppShell({ active, navigate, mobileNavOpen, setMobileNavOpen, us
         {children}
       </main>
       </div>
+      <ComposeMessageDialog />
     </div>
   );
 }
