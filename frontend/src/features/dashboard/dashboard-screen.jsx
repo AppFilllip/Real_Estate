@@ -6,6 +6,7 @@ import { Skeleton } from "../../components/ui/skeleton";
 import { useApiData } from "../../hooks/use-api-data";
 import { api } from "../../services/api";
 import { money } from "../../lib/utils";
+import { sendWhatsAppMessage } from "../../lib/whatsapp";
 
 const emptyDashboard = {
   cards: {
@@ -175,7 +176,14 @@ export function DashboardScreen({ user, navigate }) {
                     </div>
                     <div className="flex flex-none gap-1.5">
                       <Button size="sm" onClick={() => showUnavailable("Call")}>Call</Button>
-                      <Button variant="secondary" size="sm" onClick={() => showUnavailable("WhatsApp")}>WhatsApp</Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={!task.leadId}
+                        onClick={() => sendWhatsAppMessage({ leadId: task.leadId, label: task.title || "lead" })}
+                      >
+                        WhatsApp
+                      </Button>
                       <Button variant="secondary" size="sm" onClick={() => markTaskDone(task)}>Done</Button>
                     </div>
                   </div>

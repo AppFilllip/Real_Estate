@@ -7,6 +7,9 @@ import { Skeleton } from "../../components/ui/skeleton";
 import { useApiData } from "../../hooks/use-api-data";
 import { api } from "../../services/api";
 import { money } from "../../lib/utils";
+import { sendWhatsAppMessage } from "../../lib/whatsapp";
+import { sendEmailMessage } from "../../lib/email";
+import { placeCall } from "../../lib/calling";
 
 const STAGE_ORDER = ["NEW", "CONTACTED", "QUALIFIED", "VISIT_SCHEDULED", "VISIT_DONE", "NEGOTIATION", "TOKEN", "BOOKED"];
 const STAGE_TONE = {
@@ -41,9 +44,6 @@ export function LeadDetailScreen({ id, navigate, onBack }) {
   const [costSheetsResponse] = useApiData("/cost-sheets", { data: [] }, { leadId: id });
   const costSheets = Array.isArray(costSheetsResponse) ? costSheetsResponse : costSheetsResponse.data || [];
 
-  function showUnavailable(label) {
-    toast.info(`${label} is not connected yet.`);
-  }
 
   async function saveNote() {
     if (!note.trim()) return;
@@ -109,9 +109,12 @@ export function LeadDetailScreen({ id, navigate, onBack }) {
         )}
         <div className="flex-1" />
         <div className="flex gap-1.5">
-          <Button onClick={() => showUnavailable("Call")}>Call</Button>
-          <Button variant="secondary" onClick={() => showUnavailable("WhatsApp")}>
+          <Button onClick={() => placeCall({ leadId: lead.id })}>Call</Button>
+          <Button variant="secondary" onClick={() => sendWhatsAppMessage({ leadId: lead.id, label: lead.name })}>
             WhatsApp
+          </Button>
+          <Button variant="secondary" onClick={() => sendEmailMessage({ leadId: lead.id, label: lead.name })}>
+            Email
           </Button>
           <Button variant="secondary" disabled={!STAGE_ORDER.includes(lead.stage) || STAGE_ORDER.indexOf(lead.stage) === STAGE_ORDER.length - 1} onClick={advanceStage}>
             Advance stage

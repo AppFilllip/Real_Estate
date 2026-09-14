@@ -21,6 +21,36 @@ services:
         value: "true"
       - key: LOG_LEVEL
         value: info
+      - key: WHATSAPP_API_URL
+        value: https://waba.api.lumotis.com
+      - key: WHATSAPP_SESSION_ID
+        sync: false
+      - key: WHATSAPP_TOKEN
+        sync: false
+      - key: WHATSAPP_ALERT_PHONE
+        sync: false
+      - key: WHATSAPP_DEFAULT_COUNTRY_CODE
+        value: "91"
+      - key: WHATSAPP_WEBHOOK_SECRET
+        generateValue: true
+      - key: ZEPTOMAIL_API_URL
+        value: https://api.zeptomail.com/v1.1/email
+      - key: ZEPTOMAIL_TOKEN
+        sync: false
+      - key: ZEPTOMAIL_FROM_EMAIL
+        sync: false
+      - key: ZEPTOMAIL_FROM_NAME
+        value: EstateOS
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER
+        sync: false
+      - key: TWILIO_WEBHOOK_BASE_URL
+        sync: false
+      - key: TWILIO_WEBHOOK_TOKEN
+        generateValue: true
 
   - type: web
     name: real-estate-crm-frontend

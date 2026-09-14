@@ -57,6 +57,7 @@ export const sectionResources = {
   calls: { label: "Calls & IVR", resources: ["calls"] },
   inbox: { label: "Inbox", resources: ["conversations"] },
   reports: { label: "Reports", resources: ["reports"] },
+  whatsapp: { label: "WhatsApp", resources: ["whatsapp"] },
 };
 
 export function sectionFromPath(pathname) {

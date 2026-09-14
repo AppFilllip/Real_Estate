@@ -42,6 +42,8 @@ const { campaignRoutes } = require("./campaigns/campaigns.routes");
 const { conversationRoutes } = require("./conversations/conversations.routes");
 const { callRoutes } = require("./calls/calls.routes");
 const { messageRoutes } = require("./messages/messages.routes");
+const { whatsappRoutes } = require("./whatsapp/whatsapp.routes");
+const { emailRoutes } = require("./email/email.routes");
 
 const moduleRoutes = Router();
 
@@ -88,5 +90,7 @@ moduleRoutes.use("/campaigns", campaignRoutes);
 moduleRoutes.use("/conversations", conversationRoutes);
 moduleRoutes.use("/calls", callRoutes);
 moduleRoutes.use("/messages", messageRoutes);
+moduleRoutes.use("/whatsapp", whatsappRoutes);
+moduleRoutes.use("/email", emailRoutes);
 
 module.exports = { moduleRoutes };

@@ -1,6 +1,7 @@
 const { Router } = require("express");
 const { createCrudRoutes } = require("../../shared/create-crud-routes");
 const { CallsSummaryController } = require("./calls.summary.controller");
+const dialController = require("./calls.dial.controller");
 
 const callRoutes = Router();
 const summaryController = new CallsSummaryController();
@@ -8,6 +9,7 @@ const summaryController = new CallsSummaryController();
 callRoutes.get("/summary", summaryController.list);
 callRoutes.get("/missed-queue", summaryController.missedQueue);
 callRoutes.get("/numbers", summaryController.numbers);
+callRoutes.post("/dial", dialController.dial);
 
 callRoutes.use(
   createCrudRoutes({
@@ -40,6 +42,8 @@ callRoutes.use(
       "dispositionDueAt",
       "providerCallSid",
     ],
+    bigIntFields: ["costPaise"],
+    dateFields: ["startedAt", "answeredAt", "endedAt", "dispositionDueAt"],
   })
 );
 

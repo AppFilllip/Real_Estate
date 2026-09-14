@@ -11,6 +11,7 @@ const { requireAuth } = require("./middlewares/auth");
 const { resolveCompanyScope } = require("./middlewares/company-scope");
 const { authorizeRequest } = require("./middlewares/permissions");
 const { whatsappWebhookRoutes } = require("./modules/whatsapp/whatsapp.webhook.routes");
+const { callWebhookRoutes } = require("./modules/calls/calls.webhook.routes");
 
 function createApp() {
   const app = express();
@@ -27,6 +28,8 @@ function createApp() {
   app.use("/api/auth", authRoutes);
   // Public — called by the WhatsApp gateway itself, not a logged-in user.
   app.use("/api/whatsapp/webhook", whatsappWebhookRoutes);
+  // Public — called by Twilio itself while a click-to-call is in progress.
+  app.use("/api/calls/twiml", callWebhookRoutes);
   // Uploaded files served directly from disk; the permission boundary lives on
   // whichever record (project, booking, ...) the returned URL gets attached to.
   app.use("/uploads", express.static(UPLOAD_DIR));

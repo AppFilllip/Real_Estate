@@ -15,6 +15,7 @@ import { Screen } from "../dashboard/dashboard-screen";
 import { Input } from "../../components/ui/input";
 import { Select } from "../../components/ui/select";
 import { api } from "../../services/api";
+import { sendWhatsAppMessage } from "../../lib/whatsapp";
 import { canCreateRecord, canDeleteRecord, canEditRecord, RecordDialog } from "./record-dialog";
 
 const SETTINGS_TITLES = new Set(["Users", "Roles", "Teams", "Workspaces"]);
@@ -445,7 +446,7 @@ function WorkflowActions({ title, row, endpoint, onRun, onUnavailable, onSetPass
         <RowAction title="Call lead" className="w-8 px-0" onClick={() => onUnavailable("Call")}>
           <PhoneCall className="h-3.5 w-3.5" />
         </RowAction>
-        <RowAction title="Open WhatsApp" className="w-8 px-0" onClick={() => onUnavailable("WhatsApp")}>
+        <RowAction title="Open WhatsApp" className="w-8 px-0" onClick={() => sendWhatsAppMessage({ leadId: row.id, label: row.name })}>
           <MessageCircle className="h-3.5 w-3.5" />
         </RowAction>
         <RowAction
@@ -569,6 +570,7 @@ const settingsTabs = [
   { key: "roles", label: "Roles", title: "Roles", endpoint: "/roles", columns: ["name", "code", "isSystem", "createdAt"] },
   { key: "permissions", label: "Permissions" },
   { key: "workspaces", label: "Workspaces", title: "Workspaces", endpoint: "/companies", columns: ["name", "shortCode", "legalName", "gstin"] },
+  { key: "whatsapp", label: "WhatsApp" },
 ];
 
 export function SettingsScreen({ navigate }) {
@@ -591,10 +593,42 @@ export function SettingsScreen({ navigate }) {
       </div>
       {selected.key === "permissions" ? (
         <PermissionsMatrix />
+      ) : selected.key === "whatsapp" ? (
+        <WhatsAppStatusCard />
       ) : (
         <DataScreen title={selected.title} endpoint={selected.endpoint} columns={selected.columns} navigate={navigate} routeKey={selected.key} compact />
       )}
     </section>
+  );
+}
+
+/**
+ * Read-only status — credentials live in backend env vars (WHATSAPP_API_URL/
+ * SESSION_ID/TOKEN), not editable here. The gateway token expires roughly
+ * every 7 days and needs a redeploy with a fresh WHATSAPP_TOKEN.
+ */
+function WhatsAppStatusCard() {
+  const [response, , loading] = useApiData("/whatsapp/status", null);
+  const status = response?.data;
+
+  if (loading) return <Skeleton className="h-32 w-full rounded-[10px]" />;
+
+  return (
+    <Card className="max-w-md space-y-3 p-4.5">
+      <div className="flex items-center justify-between">
+        <h3 className="m-0 text-base font-semibold">WhatsApp gateway</h3>
+        <Badge tone={status?.configured ? "green" : "slate"}>{status?.configured ? "Connected" : "Not connected"}</Badge>
+      </div>
+      <p className="text-[13px] text-[#5B6472]">
+        Credentials are set via <code>WHATSAPP_API_URL</code>, <code>WHATSAPP_SESSION_ID</code>, and{" "}
+        <code>WHATSAPP_TOKEN</code> environment variables on the backend.
+      </p>
+      {status?.tokenExpiresAt && (
+        <p className="text-[13px] text-[#5B6472]">
+          Token {status.tokenExpired ? "expired" : "expires"}: {new Date(status.tokenExpiresAt).toLocaleString()}
+        </p>
+      )}
+    </Card>
   );
 }
 
